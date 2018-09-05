@@ -1,0 +1,1884 @@
+---
+title: 'Manuscript: Cancelled operations in the UK – a 7 day cohort study of planned adult inpatient surgery in 245 NHS hospitals'
+author:
+- "Danny J. N. Wong"
+- "Steve K. Harris"
+- "S. Ramani Moonesinghe"
+- "on behalf of the SNAP-2: EPICCS collaborators"
+date: "18 January 2018"
+bibliography: references/SNAP2.bib
+csl: references/british-journal-of-anaesthesia.csl
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r SNAP2_Cancellations_Manuscript_setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi = 300, fig.width = 10, fig.height = 10)
+options(scipen = 3, digits = 3)
+
+library(tidyverse)
+library(lubridate)
+library(readxl)
+library(lme4)
+library(pscl)
+library(pROC)
+library(sjPlot)
+library(DiagrammeR)
+library(DiagrammeRsvg)
+library(rsvg)
+library(tableone)
+library(labelled)
+library(pander)
+
+load("data/SNAP2_cancellations.Rdata")
+
+UK <- UK %>% filter(!(SiteCode %in% c("TEST"))) %>%
+  filter(S02OperativeUrgency %in% c("Ele", "Exp")) %>%
+  mutate(specialty_recoded = recode(specialty, 
+                                    `Colorectal` = "GI", 
+                                    `UpperGI` = "GI", 
+                                    `Bariatric` = "GI",
+                                    `HPB` = "GI",
+                                    `Spine` = "Neuro-Spine",
+                                    `Neuro` = "Neuro-Spine",
+                                    `Urology` = "Gynaecology-Urology",
+                                    `Gynae` = "Gynaecology-Urology",
+                                    `Transplant` = "Other", 
+                                    `Endoscopic` = "Other", 
+                                    `IR` = "Other", 
+                                    `Cardiology` = "Other", 
+                                    `Opthalmic` = "Other",
+                                    `Plastics` = "Other",
+                                    `MaxFax-Dental` = "Other", 
+                                    `ENT` = "Other", 
+                                    `Endocrine` = "Other", 
+                                    `Breast` = "Other"
+                                    ))
+
+cancellations_long <- cancellations_long %>% filter(!(SiteCode %in% c("TEST")))
+
+merged_data_site <- merged_data_site %>% filter(!(SiteCode %in% c("TEST")))
+
+#Look at the breakdown of these cancellation causes in SNAP-2
+cancellations_long %>% summarise_at(vars(Total:Other), .funs = (sum), na.rm = TRUE) -> cancellations_summary
+cancellations_long %>% summarise_at(vars(Total:Other), .funs = (sum), na.rm = TRUE) %>% transmute_all(funs(prop = ./Total * 100)) %>% cbind(cancellations_summary) -> cancellations_summary
+
+#Look at distribution by day of the week
+cancellations_long <- cancellations_long %>% mutate(StudyDay = wday(Date, label = TRUE))
+
+cancellations_long %>% group_by(SiteCode) %>% summarise(SumCancellations = sum(Total)) %>% filter(!is.na(SumCancellations)) %>% left_join(weekly_counts, by = "SiteCode") %>% mutate(ccuBedsTot = replace(ccuBedsTot, which(is.na(ccuBedsTot)), 0)) -> merged_data_site
+
+temp <- UK %>% left_join(other_reasons, by = "CaseId") %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(TheatreCapacity == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "TC")) %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(StaffUnavailable == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "SU")) %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(ClinicalReason == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "CR")) %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(EquipmentProblem == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "EP")) %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(DNA == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "DNA")) %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(NB == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "NB")) %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(AdminErrors == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "AE")) %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(PatientReasons == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "PR"))
+
+reasons <- data.frame(table(temp$S03PreviouslyHadThisSurgeryCancelledRescheduledReason)) %>%
+  mutate(Var1 = recode(Var1, 
+                       AE = "Administrative Error",
+                       CR = "Clinical reason",
+                       DNA = "Patient did not attend",
+                       EP = "Equipment problem",
+                       NB = "Lack of beds",
+                       NK = "Not known",
+                       PR = "Personal reasons",
+                       SU = "Staff unavailable",
+                       TC = "Insufficient operating theatre capacity")) %>%
+  rename(`Reported reasons` = Var1) %>%
+  mutate(`Count (n)` = Freq, `%` = (Freq/sum(Freq)) * 100) %>% 
+  select(`Reported reasons`, `Count (n)`, `%`) %>%
+  arrange(desc(`%`))
+
+UK <- UK %>% left_join(other_reasons, by = "CaseId") %>%
+  mutate(S03PreviouslyHadThisSurgeryCancelledRescheduledReason = replace(S03PreviouslyHadThisSurgeryCancelledRescheduledReason, which(NB == 1 & S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "O"), "NB")) 
+
+#We can construct a multilevel logistic regression model with the outcome being having had surgery cancelled before, because of a lack of beds and see the likelihood of this happening with the organisational data incorporated
+UK$outcome <- UK$S03PreviouslyHadThisSurgeryCancelledRescheduled == "Y" & UK$S03PreviouslyHadThisSurgeryCancelledRescheduledReason == "NB"
+
+#Create age bands 0-64, 65-79, >=80
+UK$age_bands <- cut(as.numeric(UK$S01Age), breaks = c(0, 64, 79, Inf), labels = c("<65", "65-79", "≥80"))
+
+#Change the malignancy coding
+UK$malignancy <- UK$S04Malignancy %in% c("PM", "MNM", "MDM")
+
+UK$S03AsaPsClass <- as.factor(UK$S03AsaPsClass)
+UK$S03PastMedicalHistoryMetastaticCancerCurrent <- as.factor(UK$S03PastMedicalHistoryMetastaticCancerCurrent)
+UK$S03PatientRequiresCriticalCareAfterTheirOperation <- as.factor(UK$S03PatientRequiresCriticalCareAfterTheirOperation)
+
+#Create scaled hospital-level variables
+weekly_counts <- weekly_counts %>% 
+  mutate(ccuBedsTot = replace(ccuBedsTot, which(is.na(ccuBedsTot)), 0)) %>%
+  mutate(ccuBedsProp = ccuBedsTot/hospitalBeds,
+         genSurgBedsProp = genSurgTotalBeds/hospitalBeds)
+weekly_counts <- transform(weekly_counts, 
+                           hospitalBeds_scaled = as.numeric(scale(hospitalBeds)),
+                           ccuBedsProp_scaled = as.numeric(scale(ccuBedsProp)),
+                           genSurgBedsProp_scaled = as.numeric(scale(genSurgBedsProp)))
+
+#Join the hospital-level variables to the patient-level variables
+UK <- UK %>% left_join(select(weekly_counts, SiteCode, hospitalBeds, hospitalBeds_scaled, ccuBedsTot, ccuBedsProp, ccuBedsProp_scaled, genSurgTotalBeds, genSurgBedsProp, genSurgBedsProp_scaled, ed, tertiaryServicesAny, enhancedWard), by = "SiteCode")
+
+comp_cases <- UK %>% 
+  select(CaseId, SiteCode, outcome, age_bands, S03AsaPsClass, S02OperativeUrgency, S02PatientOrigin, S02PlannedProcSeverity, specialty, specialty_recoded, malignancy, S03PatientRequiresCriticalCareAfterTheirOperation, hospitalBeds_scaled, ccuBedsProp_scaled, genSurgBedsProp_scaled, tertiaryServicesAny, ed, enhancedWard) %>% 
+  complete.cases() %>% sum()
+missing_cases <- nrow(UK) - comp_cases
+
+UK_complete <- UK %>% 
+  select(CaseId, SiteCode, outcome, age_bands, S02PatientOrigin, S03AsaPsClass, S02OperativeUrgency, S02PatientOrigin, S02PlannedProcSeverity, specialty, specialty_recoded, malignancy, S03PatientRequiresCriticalCareAfterTheirOperation, hospitalBeds_scaled, ccuBedsProp_scaled, genSurgBedsProp_scaled, tertiaryServicesAny, ed, enhancedWard) %>% 
+  na.omit()
+
+#Run our initial null model with random intercepts
+model.glm <- glm(outcome ~ 1 , data = UK, family = binomial(link = "logit"))
+model.glmer <- glmer(outcome ~ 1 + (1 | SiteCode), data = UK, family = binomial(link = "logit"))
+
+#Run our final multilevel model
+#model14.glmer <- glmer(outcome ~ age_bands + S03AsaPsClass + S02OperativeUrgency +  S02PatientOrigin + S02PlannedProcSeverity + specialty_recoded + malignancy + S03PatientRequiresCriticalCareAfterTheirOperation + hospitalBeds_scaled + ccuBedsProp_scaled + genSurgBedsProp_scaled + tertiaryServicesAny + ed + enhancedWard + (1 | SiteCode), data = UK_complete, family = binomial(link = "logit"), control = glmerControl(optimizer = "bobyqa"))
+
+#To save time when knitting documents, save the glmer model object as .rds
+#saveRDS(model14.glmer, file = "../data/models/model14.glmer.rds")
+model14.glmer <- readRDS("data/models/model14.glmer.rds")
+summary(model14.glmer)
+
+#Zero-inflated Poisson model for contemporaneous data
+#zeroinfl_m4 <- zeroinfl(Cancels_nobeds ~ scale(hospitalBeds) + scale(ccuBedsTot) + scale(genSurgTotalBeds) + ed + tertiaryServicesAny + enhancedWard + StudyDay + offset(log(n + TotalCancel)), data = merged_daily_site)
+
+#To save time when knitting documents, save the model object as .rds
+#saveRDS(zeroinfl_m4, file = "data/models/zeroinfl_m4.rds")
+zeroinfl_m4 <- readRDS("data/models/zeroinfl_m4.rds")
+summary(zeroinfl_m4)
+```
+
+# TITLE PAGE
+
+### Title: Cancelled operations in the UK – a 7 day cohort study of planned adult inpatient surgery in 245 NHS hospitals
+
+### Authors:
+
+**Dr Danny J. N. WONG** FRCA [^*] [^1] [^2]
+
+**Dr Steve K. HARRIS** PhD [^3]
+
+**Prof S. Ramani MOONESINGHE** MD(Res) [^1] [^2]
+
+**on behalf of the SNAP-2: EPICCS collaborators** [^4]
+
+[^*]: Corresponding author, postal address: 35 Red Lion Square, London WC1R 4SG, UK; e-mail: dwong@rcoa.ac.uk; telephone number: +44(0)7833678225
+
+[^1]: UCL/UCLH Surgical Outcomes Research Centre (SOuRCe), Department of Applied Health Research, University College London, 1&ndash;19 Torrington Place, London WC1E 7HB, UK
+
+[^2]: Health Services Research Centre, National Institute of Academic Anaesthesia, Royal College of Anaesthetists, Churchill House, 35 Red Lion Square, London WC1R 4SG, UK 
+
+[^3]: Bloomsbury Institute of Intensive Care Medicine, University College London, Gower Street, London WC1E 6BT, UK
+
+[^4]: A full list of collaborators and their affiliations is included in the Supplementary Material.
+
+# ABSTRACT
+
+**Background:** Cancellation of planned surgery impacts substantially on patients and health systems. This study describes the incidence and reasons for cancellation of inpatient surgery in the UK National Health Service (NHS).
+
+**Methods:** We conducted a prospective observational cohort study over 7 consecutive days in March 2017 in `r length(unique(UK$SiteCode))` NHS hospitals. Occurrences and reasons for previous surgical cancellation were recorded. Using multilevel logistic regression, we identified patient- and hospital-level factors associated with cancellation due to inadequate bed capacity.
+
+**Results:** We analysed data from `r formatC(nrow(UK), big.mark = ",")` patients undergoing planned surgery. `r formatC(sum(reasons["Count (n)"]), big.mark = ",")` patients (`r sum(reasons["Count (n)"])/nrow(UK)*100`%) reported previous cancellation for the same procedure; contemporaneous hospital census data indicated that `r cancellations_summary$Total/(cancellations_summary$Total + 22993) * 100`% patients attending inpatient operations were cancelled on the day of surgery. Non-clinical reasons, predominantly inadequate bed capacity, accounted for a large proportion of previous cancellations. Independent risk factors for cancellation due to inadequate bed capacity included requirement for postoperative critical care (OR = `r exp(fixef(model14.glmer))["S03PatientRequiresCriticalCareAfterTheirOperationY"]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["S03PatientRequiresCriticalCareAfterTheirOperationY", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["S03PatientRequiresCriticalCareAfterTheirOperationY", 2])`, p = `r coef(summary(model14.glmer))["S03PatientRequiresCriticalCareAfterTheirOperationY", 4]`) and the presence of an Emergency Department (ED) in the treating hospital (OR = `r exp(coef(summary(model14.glmer)))["edTRUE", 1]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["edTRUE", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["edTRUE", 2])`, p = `r coef(summary(model14.glmer))["edTRUE", 4]` ). Patients undergoing cancer surgery (OR = `r exp(fixef(model14.glmer))["malignancyTRUE"]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["malignancyTRUE", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["malignancyTRUE", 2])`, p = `r coef(summary(model14.glmer))["malignancyTRUE", 4]`), obstetric procedures (OR = `r exp(fixef(model14.glmer))["specialty_recodedObs"]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["specialty_recodedObs", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["specialty_recodedObs", 2])`, p = `r coef(summary(model14.glmer))["specialty_recodedObs", 4]`), and expedited surgery (OR = `r exp(fixef(model14.glmer))["S02OperativeUrgencyExp"]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["S02OperativeUrgencyExp", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["S02OperativeUrgencyExp", 2])`, p = `r coef(summary(model14.glmer))["S02OperativeUrgencyExp", 4]`) were less likely to be cancelled.
+
+**Conclusions:** A significant proportion of patients presenting for surgery have experienced a previous cancellation for the same procedure. Cancer surgery is relatively protected but bed capacity, including  post-operative critical care requirements, are significant risk factors for previous cancellations.
+
+# KEYWORDS
+
+Surgery; Health Services Research; Cancellations;
+
+# INTRODUCTION
+
+Last-minute cancellation of surgery can have significant adverse consequences on patient experiences and outcomes.[@tait_cancellation_1997; @ivarsson_patient_2002; @magnusson_cancellations_2011]  In the UK, operational pressures faced by the National Health Service (NHS) feature prominently in news reports and the medical literature, especially during the winter season when there is an increased rate of emergency admissions.[@oliver_blaming_2017; @pym_operating_2017] During the 2017/18 winter, NHS England went so far as to recommend that all hospitals cancel elective surgery during January, to mitigate against the competing pressure on emergency services.[@lay_nhs_2018] Cancellations are, however, not just a winter problem, and may be due to other factors including unexpected changes in health affecting fitness for surgery, inadequate patient preparation and logistical reasons such as staffing issues or equipment failure.[@rai_day_2003; @lau_retrospective_2010; @kumar_reasons_2012; @dimitriadis_challenge_2013; @bass_report_2014; @caesar_incidence_2014; @kaddoum_causes_2016] Elective surgical cancellation rates appear to be rising, even after accounting for seasonal fluctuations.[@the_nuffield_trust_cancelled_2017]
+
+The rates of surgical cancellations attributable to different risk factors are not known: current collated reports of cancellations at a national level do not record causes, and studies which have looked at this issue have been predominantly small samples or single centre evaluations.[@rai_day_2003; @lau_retrospective_2010; @kumar_reasons_2012; @dimitriadis_challenge_2013; @bass_report_2014; @caesar_incidence_2014; @kaddoum_causes_2016] We therefore undertook a national study to explore the incidence of cancellations, and risk factors for cancellation at patient and hospital level. We focused in particular on cancellations of planned surgery due to insufficient bed capacity.
+
+# METHODS
+
+This was a planned analysis of data collected as part of the Second Sprint National Anaesthesia Project: EPIdemiology of Critical Care provision after Surgery (SNAP-2: EPICCS) study – a prospective observational study into perioperative risk and critical care provision for adult inpatient surgery.[@moonesinghe_snap-2_2017] We report our findings in accordance with the Strengthening the Reporting of Observational Studies in Epidemiology (STROBE) statement.[@elm_strengthening_2007] All hospitals in the United Kingdom undertaking adult surgery were approached to participate via their Quality Audit and Research Coordinator (QuARC): this is a network of anaesthetists managed by the Health Services Research Centre (HSRC) based at the Royal College of Anaesthetists.[@walker_patient_2016] All patients undergoing inpatient surgery (defined as a procedure requiring the care of an anaesthetist and requiring an overnight stay in hospital) during a one week period, 21&ndash;27 March 2017, were eligible for recruitment. Ethical approval was obtained from the Health Research Authority (South Central - Berkshire B REC, reference number: 16/SC/0349). Permission to collect patient identifiable data without consent was granted through Section 251 exemption from the Confidentiality Advisory Group for England and Wales (CAG reference: 16/CAG/0087), and the NHS Scotland Public Benefit and Privacy Panel for Health and Social Care (PBPP reference: 1617-0126). Individual Health and Social Care Trust research and development department approvals were obtained for sites in Northern Ireland.
+
+Patient demographic and perioperative variables were collected prospectively by local clinicians providing clinical care (see Supplementary Material, Case Record Form). Only patients undergoing planned surgery have been included in this analysis: we have defined this as cases classified as elective or expedited according to the criteria established by the National Confidential Enquiry into Patient Outcome and Death.[@ncepod_classification_2004] Clinicians recorded whether these patients had experienced a previous cancellation for the same surgical procedure, and the reason for this earlier cancellation, categorized as follows: insufficient bed capacity; clinical reasons; reasons not known; or other reasons which were reported as free-text. Free text responses were classified into the following categories: administrative error, patient did not attend, equipment problem, personal reasons (e.g. patient no longer wishing to undergo surgery), staff unavailable, and insufficient theatre capacity. The primary outcome was previous cancellation of the same operation due to inadequate bed capacity ("historical cancellations"). Each hospital additionally reported the number and reasons for day-of-surgery cancellations for each day of the recruitment period ("contemporaneous cancellations"), and described structural characteristics in an organisational survey.[@wong_postoperative_2018]
+
+## Statistical Analysis
+
+We report the incidence of historical cancellations in patients who proceeded to surgery during the period and incidence of contemporaneous cancellations during the study. We also report the reasons for both types of cancellations. Descriptive statistics for normally distributed continuous data are reported with the mean and standard deviation (SD), and for non-normally distributed data with the median and interquartile (IQR) range. Continuous data were assessed for normal distribution using histogram plots and the two-sided Kolmogorov-Smirnov test. For all analyses, a p-value of <0.05 was considered statistically significant.
+
+### Multilevel regression modelling of historical cancellations
+
+We modelled reported previous cancellations due to insufficient bed capacity in a two-level (patients nested within hospitals) multivariable logistic regression model with random intercepts for hospitals. Multilevel regression modelling considers the fact that cancellations may cluster within hospitals during the study period and therefore may have correlated errors [@gelman_data_2007; @garson_hierarchical_2013]. The random intercept introduced in our model allows for the cancellations to be more frequent in one hospital than another, and reduces bias in the estimates of other model coefficients. We performed a complete cases analysis (excluding cases with missing data) as we considered the proportion of cases with missing values to be negligible (`r (missing_cases + 13)/nrow(UK) * 100`% of total cases).[@graham_analysis_2012] The predictor variables were chosen *a priori* based on clinical plausibility and face validity for influencing cancellations, and to adjust for potential differences due to case-mix. Hospital level continuous variables (hospital bed numbers, critical care bed capacity, general surgical bed capacity) were standardized by subtracting the mean and dividing by the standard deviation before entering the model. Patient-level variables included: age (categorised into three groups: 18&ndash;64, 65&ndash;79 and ≥80 years)[@protopapa_development_2014]; American Society of Anesthesiology Physical Status (ASA) grades (I or II, III, and IV or V)[@cullen_asa_1994; @protopapa_development_2014]; urgency of operation (NCEPOD-Expedited vs. NCEPOD-Elective); operative severity (Minor, Intermediate, Major, Xmajor and Complex, as defined by AXA-PPP procedure codes)[@protopapa_development_2014; @_axa_2016]; surgical specialty (categorized into eight groups, Supplementary Material); whether the patient was admitted to hospital prior to surgery, whether the surgery was as part of a cancer pathway, and whether postoperative critical care admission was required.
+
+Hospital-level variables included: hospital size (as measured by the total number of hospital beds); critical care bed capacity (the proportion of critical care beds within total hospital beds); general surgical bed capacity (the proportion of general surgical ward beds within total hospital beds); presence of an emergency department; provision of tertiary services (any one from a list of 16 tertiary services, see Supplementary Material), and provision of enhanced care ward beds. Critical care beds were defined as Level 2 or Level 3 beds according to Intensive Care Society and Faculty of Intensive Care Medicine definitions.[@intensive_care_society_levels_2009; @_core_2013] Enhanced care ward beds were defined as areas within the hospital with bed capacity to provide any subset of critical care interventions outside of the traditional Intensive Care or High-Dependency Unit (ICU/HDU).[@batchelor_critical_2017; @wong_postoperative_2018]
+
+Model performance was assessed by computing the Area Under the Receiver Operating Characteristic Curve (AUROC), which can take values between 0.5 and 1.0, where <0.7 identifies a model with poor performance, 0.7&ndash;0.8 indicates acceptable performance, 0.8&ndash;0.9 indicates good performance, and >0.9 indicates high performance. We report the estimated Odds Ratios (OR), Wald 95% Confidence Intervals (CI) of these ORs and associated p-values of the fixed-effects components for our final mixed-effects model. 
+
+### Contemporaneous day-of-surgery cancellations
+
+In addition to the historical cancellations data reported by individual patients, we also collected the number of day-of-surgery cancellations due to insufficient bed capacity for each day of patient recruitment reported at each hospital. This aggregated contemporaneous data was collected to estimate the incidence of cancellations during the one week of patient data collection. We then used this aggregated data to perform a sensitivity analysis to confirm that the hospital-level associations detected in our multilevel logistic regression model were similar to those estimates in the patient level data on previous cancellations. This was performed using a zero-inflated Poisson regression model in which the response variable (cancellations per day) was regressed against the same hospital-level variables as in our earlier model, with additional variables for the day-of-the-week (see Supplementary Material for the full model).
+
+Analyses were performed using the R Statistical Computing language (`r version$version.string`, R Foundation for Statistical Computing, Vienna, Austria), with the following packages enabled: `tidyverse`, `lme4`, `sjPlot`, `tableone`, `pscl`. Multilevel logistic regression models were constructed using the `glmer` command; zero-inflated Poisson models were constructed using the `zeroinfl` command. Code for all analyses are available on request.
+
+# RESULTS
+
+## Hospital and Patient Characteristics
+
+Of 263 hospitals across the UK invited to participate in the SNAP-2: EPICCS study, `r length(unique(UK$SiteCode))` hospitals submitted patient data (response rate = `r length(unique(UK$SiteCode))/263 * 100`%). These hospitals operated within `r (137 + 10 + 6 + 3)` English NHS Trusts, Scottish and Welsh NHS Health Boards, and Northern Irish Health and Social Care Trusts, this study therefore reports data from `r (137 + 10 + 6 + 3)/(147 + 14 + 7 + 5) * 100`% of UK secondary care organisations offering adult surgical services. During the one-week recruitment window, data were collected on `r nrow(UK)` patients who underwent elective or expedited inpatient surgery, and complete data for analysis were available for `r comp_cases` cases (Figure 1). .
+
+There were `r sum(reasons["Count (n)"])` patients (`r sum(reasons["Count (n)"])/nrow(UK)*100`%) who had their surgery cancelled at least once for the same procedure. Patients previously cancelled because of insufficient bed capacity were older, had higher ASA grades, were more likely to be undergoing Xmajor or complex surgery, and more likely to require postoperative critical care (Table 1). The most common single cause of previous cancellation was for clinical reasons (`r reasons[1,3]`%); however, insufficient bed capacity (`r reasons[2,3]`%), and insufficient operating theatre capacity (`r reasons[4,3]`%) and other potentially avoidable non-clinical reasons accounted for approximately 50% of cancellations (Table 2).
+
+## Multilevel logistic regression modelling of historical cancellations
+
+Our multilevel logistic regression model (Table 3) exhibited good discrimination (AUROC = `r roc(response = UK_complete$outcome, predictor = predict(model14.glmer, type="response"))$auc`, `r ci(roc(response = UK_complete$outcome, predictor = predict(model14.glmer, type="response")))`). The only patient-level predictor (Figure 2) identified in our model which increased the likelihood of cancellation was the requirement for postoperative critical care (OR = `r exp(fixef(model14.glmer))["S03PatientRequiresCriticalCareAfterTheirOperationY"]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["S03PatientRequiresCriticalCareAfterTheirOperationY", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["S03PatientRequiresCriticalCareAfterTheirOperationY", 2])`, p = `r coef(summary(model14.glmer))["S03PatientRequiresCriticalCareAfterTheirOperationY", 4]`). 
+
+In contrast, surgery for the treatment of cancer (OR = `r exp(fixef(model14.glmer))["malignancyTRUE"]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["malignancyTRUE", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["malignancyTRUE", 2])`, p = `r coef(summary(model14.glmer))["malignancyTRUE", 4]`), obstetric procedures (OR = `r exp(fixef(model14.glmer))["specialty_recodedObs"]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["specialty_recodedObs", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["specialty_recodedObs", 2])`, p = `r coef(summary(model14.glmer))["specialty_recodedObs", 4]`), and NCEPOD-Expedited surgery (OR = `r exp(fixef(model14.glmer))["S02OperativeUrgencyExp"]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["S02OperativeUrgencyExp", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["S02OperativeUrgencyExp", 2])`, p = `r coef(summary(model14.glmer))["S02OperativeUrgencyExp", 4]`) were associated with reduced odds of previous cancellation.
+
+Hospital-level predictors (Figure 3) associated with cancellation were: presence of emergency departments (OR = `r exp(coef(summary(model14.glmer)))["edTRUE", 1]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["edTRUE", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["edTRUE", 2])`, p = `r coef(summary(model14.glmer))["edTRUE", 4]` ), and the presence of enhanced care ward areas  (OR = `r exp(coef(summary(model14.glmer)))["enhancedWardTRUE", 1]`, 95% CI: `r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["enhancedWardTRUE", 1])`&ndash;`r exp(confint(model14.glmer, parm = "beta_", method = "Wald")["enhancedWardTRUE", 2])`, p = `r coef(summary(model14.glmer))["enhancedWardTRUE", 4]`).
+
+## Contemporaneous day-of-surgery cancellations
+
+During our one-week study period, a total of `r cancellations_summary$Total` cases were cancelled or rescheduled on the day-of-surgery, and `r 22993` operations proceeded ahead. We therefore estimate that `r cancellations_summary$Total/(cancellations_summary$Total + 22993) * 100`% of cases that week were cancelled on the day of surgery. Of these contemporaneous cancellations, `r cancellations_summary$HospBed + cancellations_summary$CCU` cases (`r cancellations_summary$HospBed_prop + cancellations_summary$CCU_prop`%) were due to insufficient bed capacity, and `r cancellations_summary$Medical` cases (`r cancellations_summary$Medical_prop`%) were cancelled for clinical reasons. In the remaining `r cancellations_summary$Other` cases (`r cancellations_summary$Other_prop`%) no reason for the cancellation was specified. A sensitivity analysis conducted via zero-inflated Poisson regression using this contemporaneous data confirmed the hospital-level associations identified in the multilevel logistic regression model (Supplementary Material).
+
+# DISCUSSION
+
+## Principal findings
+
+In this national one-week study, 10% of patients attending hospital for planned inpatient surgery had previously experienced at least one cancellation for the same procedure. Multilevel logistic regression modelling demonstrated the association between treatment in a hospital with an emergency department and an increased risk of cancellation. Patient-level risk factors for cancellation included the need for a postoperative critical care bed; however, cancer surgery, expedited surgery and obstetric procedures were less likely to be cancelled. A large proportion of previous cancellations were due to non-clinical factors such as capacity or other hospital factors, and approximately 30% were due to clinical reasons. 
+
+## Study strengths and limitations
+
+To our knowledge, this study provides the most comprehensive UK data for rates and reasons for surgical cancellations to date, with data from more than `r round((137 + 10 + 6 + 3)/(147 + 14 + 7 + 5) * 100)`% of UK secondary care organisations offering adult surgical services. Our findings are therefore likely to be generalisable across the NHS and immediately relevant to healthcare policymakers. Previous research on this topic has been limited to single-centre reports.[@rai_day_2003; @lau_retrospective_2010; @kumar_reasons_2012; @dimitriadis_challenge_2013; @bass_report_2014; @caesar_incidence_2014; @kaddoum_causes_2016] Estimates of the incidence of cancellations from these older studies therefore vary widely, ranging from 0.15% to 39.0% of planned surgical cases.[@lau_retrospective_2010; @caesar_incidence_2014] Acknowledged difficulties with defining the denominator of how many operations are performed in the UK [@abbott_frequency_2017] means that it is difficult to estimate the proportion of operations which are cancelled using administrative data. NHS England publishes time-series statistics of elective surgery cancellations for non-clinical reasons, including the absolute number of cancellations and these numbers as a percentage of the number of total hospital admissions each quarter.[@nhs_england_cancelled_2018] Our data correlate well with the number of cancellations recorded by NHS England during the same period in 2017 while additionally recording all causes of cancellations, not just non-clinical. Therefore, the comprehensiveness of our sample, along with the provision of denominator data, provides for the first time, robust national data which may be used to generate and test hypotheses to address the issue of surgical cancellations. 
+
+Limitations of this study include its 1 week cohort design, as the rates and reasons for cancellations in a week in March may not necessarily represent those occurring throughout the year. It is well-known that surgical cancellations follow a seasonal variation, with substantially higher cancellations occurring during the winter months.[@the_nuffield_trust_cancelled_2017] Time-series methods of analysing cancellations have previously been suggested for tracking and monitoring variation in cancellation within individual institutions over time for the purpose of measuring hospital-level service quality [@dexter_validation_2005]. Ideally, we would have liked to collect data over a longer duration in order to model cancellations over time, however, maintaining the quality and granularity of the data we wanted is likely to have been infeasible across the almost 250 hospitals in our study. 
+
+We also could not distinguish between clinical cancellations due to inadequate preoperative preparation, (for example, failure to stop anticoagulants or poor patient optimisation); or unpreventable acute illness (for example respiratory tract infection). Finally, as we modelled historical cancellations in patients who eventually underwent surgery, we may not have captured patients who had planned surgery cancelled but then subsequently presented for emergency surgery or died; thus, we may have underestimated both the incidence and the impact of cancellations in our methodology. Future studies or audits of avoidable cancellations should consider these issues in design. 
+
+## Clinical implications
+
+Our study highlights that a substantial proportion of patients who undergo inpatient surgery are cancelled at least once, representing both an opportunity cost to the NHS, and distress and potential harm to patients.[@tait_cancellation_1997; @ivarsson_patient_2002; @magnusson_cancellations_2011] Cancellations prolong surgical waiting lists, and may represent inefficient use of resources.[@lau_retrospective_2010] Prolonged patient suffering, worsened patient experience, and delays resulting in worsened clinical outcomes have all been reported consequences to cancellations.[@tait_cancellation_1997; @ivarsson_patient_2002; @magnusson_cancellations_2011] Furthermore, patients affected by cancellations may experience negative psychological impacts on levels of anxiety and mood, and may suffer personal economic hardship from repeatedly planning time away from work.
+
+Our findings suggest that clinicians prioritise cases appropriately when clinical resources are limited. However, it is of interest that patients treated in hospitals with enhanced care wards are more likely to be cancelled. We propose that hospitals with insufficient critical care capacity to meet demand, have attempted to mitigate against cancellations or poor quality care through the development of enhanced ward facilities; however, these may yet not completely solve the capacity problem.  
+
+Our data may be used to guide developments in the structures of surgical services. For example, ring-fencing of beds for elective surgery is a recommendation from the Getting It Right First Time national review of orthopaedic and cardiothoracic surgery services in England although it is not clear if this approach would generalise more widely.[@briggs_getting_2015; @richens_getting_2018] Service redesign of this type may be further supported by our finding that despite maternity units generally providing a high volume service including both emergency and planned surgery, obstetric patients are much less likely to be cancelled; this is likely to be because most hospitals have dedicated wards and operating theatres for obstetric patients.[@royal_college_of_obstetricians_and_gynaecologists_safer_2007; @department_of_health_health_2013] However, the challenges of implementing a ring-fenced solution in a hospital which also provides emergency care cannot be underestimated, as the impact of ring-fencing might impact on other hospital workflows. Other solutions to these issues may include seasonal planning, where fewer planned procedures are scheduled for the Winter months, and instead clinical capacity diverted to emergency care and outpatient clinics. This is similar in nature to the action taken by NHSE during January of this year; however, earlier planning may support a reduced number of late cancellations. Similarly, increasing dedicated emergency surgical capacity in hospitals with emergency departments may allow for the provision of emergency surgery without encroaching on capacity to undertake elective operations. This could be through the provision of beds on dedicated emergency surgery units and / or greater emergency operating theatre capacity. There is substantial evidence that avoiding delay in emergency cases is of patient benefit, and national guidelines now recommend prompt surgery in, for example, hip fractures and emergency laparotomies.[@wilkinson_age_2010; @nela_project_team_third_2017; @royal_college_of_physicians_national_2017] 
+
+Our study highlights an area of opportunity for improvement through structured auditing of cancellations data at local level. Analysis of non-clinical reasons for cancellation according to a similar categorization used in this study may enable hospitals to focus on specific areas where interventions may reduce the risk of cancellation. While some hospital information technology systems already collect and encode such data routinely,[@dimitriadis_challenge_2013; @caesar_incidence_2014] it is by no mean ubiquitous. Further, the quality of preoperative assessment and optimisation, and of communication between patients and hospitals before surgery, could be more closely investigated to help develop strategies to mitigate against late cancellation for clinical reasons.
+
+Finally, our findings suggest that patients who are deemed by their clinicians to require postoperative critical care may have their procedures postponed in the event of critical care beds being unavailable. It is known that the UK has fewer critical care beds per capita than many other high- and middle-income countries,[@adhikari_critical_2010; @rhodes_variability_2012] and these findings may suggest inadequate surgical critical care capacity in the UK. Lack of critical care capacity has also been as the principal reason for cancellation of surgery in hospitals where unusually high levels of expedited cases were postponed.[@campbell_hospitals_2018] Operational research which uses mathematical modelling to forecast patient flows and therefore reduce cancellations due to critical care bed shortages has had some success in mitigating these risks.[@pearson_calculating_2012; @utley_bring_2012]
+
+However, the issue of which patients require critical care after surgery is not straightforward. Critical care support may be required for specific interventions (for example ventilator or vasopressor support) or to facilitate enhanced monitoring and nursing surveillance at a time of high perioperative risk. Possibly due to the heterogeneity of the critical care "intervention", guidelines recommending which patients require this resource are based predominantly on expert opinion rather than trial data; furthermore, different guidelines and specialties have different views on how patients should be prioritised for postoperative critical care admission.[@findlay_knowing_2011; @anderson_higher_2011] For example, it is routine to send patients to critical care after elective cardiac surgery, but not necessarily after elective major bowel surgery which has higher postoperative mortality and complication rates.[@pearse_identification_2006; @smith_guidance_2016] 
+
+Recent large-scale studies also raise the issue of whether critical care is of benefit to all patients, or whether in fact some may be harmed by inappropriate intervention.[@kahan_critical_2017; @taccone_we_2017] There therefore needs to be research into which patients would benefit most from critical care, so as to make best use of this limited resource. While there are ethical and practical challenges around conducting randomised trials in this field,[@@pearse_identification_2006; @sobol_triage_2011; @kahan_critical_2017] novel statistical techniques designed for inferring causation in observational studies may provide a solution&mdash;to that end, the main analysis of the SNAP-2: EPICCS study will attempt to address this question.[@moonesinghe_snap-2_2017]
+
+## Conclusion
+
+A large number of surgical cancellations occur within the UK, and in the majority of cases these are due to non-clinical reasons. Structural modifications, in particular around service reconfiguration to separate emergency and elective care, as well as seasonal planning, should be modelled and evaluated for clinical and cost effectiveness.
+
+# Details of authors contributions
+
+Study conception, ethics application: DJNW, SKH, SRM. 
+Data collection: The SNAP-2: EPICCS collaborators.
+Data preparation: DJNW. 
+Data analysis and interpretation: DJNW, SKH, SRM. 
+Manuscript preparation, revisions and final manuscript approval: DJNW, SKH, SRM. 
+SRM is the Chief Investigator and the guarantor.
+
+# Acknowledgements
+
+The authors thank the SNAP-2: EPICCS collaborators for all data collected. A full list of collaborators and their affiliations is included in the Supplementary Material. In particular, the authors thank Professor Tim Cook for providing comments and suggestions to the manuscript, our lay representative Richard Shawyer for his invaluable input at all stages of the study, and the Quality Audit and Research Coordinator (QuARC) Network of the Health Services Research Centre at the Royal College of Anaesthetists for supporting the study at their hospitals. We thank the following Trainee Research Networks for helping to coordinate the study in their regions of the UK: Research & Audit Federation of Trainees (RAFT), Anaesthetic Audit and Research Matrix of Yorkshire (AARMY), Intensive Care & Anaesthesia Research Network of North East Trainees (INCARNNET), Merseyside Anaesthetic Group for Improving Quality (MAGIQ), North West Research and Audit Group (NWRAG), Oxford Critical Care Anaesthetic Research Enterprise (OxCCARE), Pan-London Peri-operative Audit & Research Network (PLAN), Scottish East Quality Improvement & Research Academy (SEQuoIA), SESSA Quality Improvement and Research Network (SQUARES), Severn Trainees Anaesthetic Research (STAR), South West Anaesthetic Research Matrix (SWARM), South Yorkshire Hospitals Audit and Research Collaboration (SHARC), Southcoast Peri-operative Audit and Research Collaboration (SPARC), Welsh Anaesthetic Audit Research & Engagement Network (WAAREN), West Midlands Trainee Research Anaesthesia & Intensive Care Network (WMTRAIN).
+
+# Declaration of interests
+
+SRM is Associate National Clinical Director for elective care at NHS England.
+
+# Funding
+
+SNAP-2: EPICCS has been supported by the National Institute for Academic Anaesthesia (Association of Anaesthetists of Great Britain and Ireland Project grant), the Royal College of Anaesthetists and the UCLH NIHR Biomedical Research Centre. The study is adopted in the UK onto the NIHR Clinical Research Portfolio and equivalents in the devolved nations, and supported by NIHR Local Clinical Research Networks. SRM and SKH are Improvement Science Fellows funded by the Health Foundation. SRM is supported for her role as Director of the NIAA Health Services Research Centre by funding from the Royal College of Anaesthetists. DJNW receives a clinical salary from The London Clinic hospital and a clinical research fellowship salary from the UCLH NIHR Surgical Outcomes Research Centre.
+
+# TABLES
+
+## Table 1
+
+```{r SNAP2_Cancellations_Manuscript_Table1, echo=FALSE, message=FALSE, warning=FALSE}
+UK_table1 <- UK %>% 
+  filter(CaseId %in% UK_complete$CaseId) %>%
+  select(S01Age, S01Gender, S03AsaPsClass, S02OperativeUrgency, S02PatientOrigin, S02PlannedProcSeverity, specialty_recoded, S03ReferredForPostoperativeCriticalCare, S04Malignancy, outcome) %>%
+  mutate(Age  = as.numeric(S01Age),
+         Sex = as.factor(S01Gender),
+         ASA = as.factor(S03AsaPsClass),
+         Urgency = as.factor(S02OperativeUrgency),
+         Inpatient = as.factor(S02PatientOrigin),
+         OpSeverity = as.factor(S02PlannedProcSeverity),
+         Specialty = as.factor(specialty_recoded),
+         PostopCritCare = S03ReferredForPostoperativeCriticalCare,
+         Cancer = S04Malignancy %in% c("MDM", "MNM", "PM"),
+         PreviouslyCancelled = outcome) %>%
+  set_variable_labels(Urgency = "NCEPOD category", Inpatient = "Patient admitted before surgery", OpSeverity = "Operative severity", PostopCritCare = "Required postoperative critical care", Cancer = "Cancer surgery", PreviouslyCancelled = "Previous surgical cancellation because of lack of beds") %>%
+  select(Age, Sex, ASA, Urgency, Inpatient, OpSeverity, Specialty, PostopCritCare, Cancer, PreviouslyCancelled) %>%
+  CreateTableOne(data = .,
+                 vars = c("Age", "Sex", "ASA", "Urgency", "Inpatient", "OpSeverity", "Specialty", "PostopCritCare", "Cancer"),
+                 strata = "PreviouslyCancelled")
+print(UK_table1, nonnormal = c("Age"), test = FALSE, printToggle = FALSE, varLabels = TRUE) %>% pander(caption = "Table 1: Patient characteristics.")
+
+UK_table1total <- UK %>% 
+  filter(CaseId %in% UK_complete$CaseId) %>%
+  select(S01Age, S01Gender, S03AsaPsClass, S02OperativeUrgency, S02PatientOrigin, S02PlannedProcSeverity, specialty_recoded, S03ReferredForPostoperativeCriticalCare, S04Malignancy, outcome) %>%
+  mutate(Age  = as.numeric(S01Age),
+         Sex = as.factor(S01Gender),
+         ASA = as.factor(S03AsaPsClass),
+         Urgency = as.factor(S02OperativeUrgency),
+         Inpatient = as.factor(S02PatientOrigin),
+         OpSeverity = as.factor(S02PlannedProcSeverity),
+         Specialty = as.factor(specialty_recoded),
+         PostopCritCare = S03ReferredForPostoperativeCriticalCare,
+         Cancer = S04Malignancy %in% c("MDM", "MNM", "PM"),
+         PreviouslyCancelled = outcome) %>%
+  set_variable_labels(Urgency = "NCEPOD category", Inpatient = "Patient admitted before surgery", OpSeverity = "Operative severity", PostopCritCare = "Required postoperative critical care", Cancer = "Cancer surgery", PreviouslyCancelled = "Previous surgical cancellation because of lack of beds") %>%
+  select(Age, Sex, ASA, Urgency, Inpatient, OpSeverity, Specialty, PostopCritCare, Cancer, PreviouslyCancelled) %>%
+  CreateTableOne(data = .,
+                 vars = c("Age", "Sex", "ASA", "Urgency", "Inpatient", "OpSeverity", "Specialty", "PostopCritCare", "Cancer"))
+print(UK_table1total, nonnormal = c("Age"), test = FALSE, printToggle = FALSE, varLabels = TRUE) %>% pander(caption = "Table 1: Patient characteristics.")
+```
+
+## Table 2
+
+```{r SNAP2_Cancellations_Manuscript_Table2, echo=FALSE, message=FALSE, warning=FALSE}
+pander(reasons, caption = "Table 2: Reasons for previous cancellations.")
+```
+
+## Table 3
+
+```{r SNAP2_Cancellations_Manuscript_Table3, echo=FALSE, message=FALSE, warning=FALSE}
+sjt.glmer(model14.glmer, 
+          group.pred = TRUE, 
+          show.re.var = FALSE, 
+          show.icc = FALSE,
+          no.output = TRUE,
+          pred.labels = c("Age 65-79", "Age ≥80", "ASA III", "ASA IV or V", "NCEPOD-Expedited surgery", "Patient admitted before surgery", "Operative severity (Intermediate)", "Operative severity (Major)", "Operative severity (Xmajor)", "Operative severity (Complex)", "Specialty (Other)", "Specialty (Gynaecology/Urology)", "Specialty (Neuro/Spinal)", "Specialty (Obstetrics)", "Specialty (Orthopaedics)", "Specialty (Thoracics/Cardiac)", "Specialty (Vascular)", "Cancer Surgery", "Postoperative Critical Care Planned", "Hospital size (scaled total bed numbers)", "Proportion of critical care beds (scaled)", "Proportion of general surgical beds (scaled)", "Tertiary services offered", "Emergency Department present", "Enhanced care wards present"))
+```
+
+# FIGURES
+
+## Figure 1
+
+```{r SNAP2_Cancellations_Manuscript_Fig1, echo=FALSE, message=FALSE, warning=FALSE}
+#Set up the contents for each box
+a1 <- paste0('Total available patients\nfrom ',
+             245,
+             ' NHS hospitals\n(n = 22,993)')
+b1 <- ''
+c1 <- ''
+d1 <- paste0('Included for analysis\n(n = ',
+             formatC(comp_cases, big.mark = ','),
+             ')')
+e1 <- 'Patient-level linked with\nhospital-level variables\nfor multilevel regression'
+a2 <- ''
+b2 <- paste0('Excluded:\n\t NCEPOD-Urgent (n = ', 
+             formatC(6846, big.mark = ','), 
+             ')\n\t',
+             'NCEPOD-Immediate (n = ',
+             formatC(1198, big.mark = ','),
+             ')\n\t',
+             'Missing NCEPOD category (n = ',
+             sum(13),
+             ')')
+c2 <- paste0('Excluded:\n\tMissing predictor variables (n = ', 
+             missing_cases, 
+             ')')
+d2 <- ''
+e2 <- ''
+
+ndf <- create_node_df(
+  n = 10,
+  label = c(a1, b1, c1, d1, e1, #Column 1
+            a2, b2, c2, d2, e2), #Column 2
+  style = c('solid', 'invis', 'invis', 'solid', 'solid', #Column 1
+            'invis', 'solid', 'solid', 'invis', 'invis'), #Column 2
+  shape = c('box', 'point', 'point', 'box', 'box', #Column 1 
+            'plaintext', 'box', 'box', 'point', 'point'), #Column 2
+  width = c(3, 0.001, 0.001, 3, 3, #Column 1
+            2, 3.5, 3.5, 0.001, 0.001), #Column 2
+  height = c(1, 0.001, 0.001, 1, 1, #Column 1
+             1, 1, 1, 0.001, 0.001), #Column 2
+  fontsize = c(rep(14, 10)),
+  fontname = c(rep('Helvetica', 10)),
+  penwidth = 1.5,
+  fixedsize = 'true')
+
+edf <- create_edge_df(
+  from = c(1, 2, 3, 4, #Column 1
+           6, 7, 8, 9, #Column 2
+           2, 3 #Horizontals
+           ),
+  to = c(2, 3, 4, 5, #Column 1
+         7, 8, 9, 10, #Column 2
+         7, 8 #Horizontals
+         ),
+  arrowhead = c('none', 'none', 'normal', 'normal', #Column 1
+                'none', 'none', 'none', 'none', #Column 2
+                'normal', 'normal' #Horizontals
+                ),
+  color = c('black', 'black', 'black', 'black', #Column 1
+            '#00000000', '#00000000', '#00000000', '#00000000', #Column 2
+            'black', 'black' #Horizontals
+            ),
+  constraint = c(rep('true', 8), #Columns
+                 rep('false', 2) #Horizontals
+                 )
+)
+  
+g <- create_graph(ndf,
+                  edf,
+                  attr_theme = NULL)
+
+#render_graph(g)
+
+export_graph(g, file_name = "output/figures/SNAP2_Cancellations_Manuscript_Fig1.png", width = 1600, height = 1800)
+
+export_graph(g, file_name = "output/figures/SNAP2_Cancellations_Manuscript_Fig1.pdf")
+
+#STROBE_flow_diagram %>% export_svg() %>% charToRaw() %>% rsvg() %>% png::writePNG("../output/figures/Cancellations_STROBE.png", dpi = 300)
+
+#STROBE_flow_diagram %>% export_svg() %>% charToRaw() %>% rsvg_pdf(file = "../output/figures/Cancellations_STROBE.pdf")
+```
+
+![Figure 1: Flow diagram of patients included and excluded from analysis. ](output/figures/SNAP2_Cancellations_Manuscript_Fig1.png)
+
+## Figure 2
+
+```{r SNAP2_Cancellations_Manuscript_Fig2, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Figure 2: Patient-level fixed effects associated with the likelihood of experiencing a previous cancellation. Significant effects are highlighted in black, and insignificant effects have been de-emphasised for clarity of interpretation. `*` = p < 0.05, `**` = p < 0.01, `***` = p < 0.001"}
+sjp.setTheme(base = theme_classic())
+sjp.glmer(model14.glmer, 
+        type = "fe",
+        remove.estimates = c("enhancedWardTRUE", "edTRUE", "tertiaryServicesAnyTRUE", "genSurgBedsProp_scaled", "ccuBedsProp_scaled", "hospitalBeds_scaled"),
+        axis.labels = c("Age 65-79", "Age 80 or more", "ASA III", "ASA IV or V", "NCEPOD-Expedited Classification", "Patient admitted before surgery", "Intermediate", "Major", "Xmajor", "Complex", "Other", "Gynaecology/Urology", "Neuro/Spinal", "Obstetrics", "Orthopaedics", "Thoracics/Cardiac", "Vascular", "Cancer Surgery", "Postoperative Critical Care Planned"),
+        axis.title = c("Odds Ratio"),
+        title = "Patient-level fixed effects",
+        y.offset = 0.4,
+        geom.colors = "bw",
+        fade.ns = TRUE)
+ggsave("output/figures/SNAP2_Cancellations_Manuscript_Fig2.pdf", width = 10, height = 10, units = "in", dpi = 300)
+```
+
+## Figure 3
+
+```{r SNAP2_Cancellations_Manuscript_Fig3, echo=FALSE, message=FALSE, warning=FALSE, fig.height=3.2, fig.cap="Figure 3: Hospital-level fixed effects associated with the likelihood of experiencing a previous cancellation. Significant effects are highlighted in black, and insignificant effects have been de-emphasised for clarity of interpretation. `*` = p < 0.05, `**` = p < 0.01, `***` = p < 0.001"}
+sjp.glmer(model14.glmer, 
+        type = "fe",
+        remove.estimates = c("S03PatientRequiresCriticalCareAfterTheirOperationY", "malignancyTRUE", "specialty_recodedVascular", "specialty_recodedThoracic", "specialty_recodedOrtho", "specialty_recodedObs", "specialty_recodedNeuro-Spine", "specialty_recodedGynaecology-Urology", "specialty_recodedOther", "S02PlannedProcSeverityCom", "S02PlannedProcSeverityXma", "S02PlannedProcSeverityMaj", "S02PlannedProcSeverityInt", "S02PatientOriginI", "S02OperativeUrgencyExp", "S03AsaPsClassIV or V", "S03AsaPsClassIII", "age_bands=80", "age_bands65-79"),
+        axis.labels = c("Hospital size", "Proportion of critical care beds", "Proportion of general surgical beds", "Tertiary services offered", "Emergency Department present", "Enhanced care wards present"),
+        axis.title = c("Odds Ratio"),
+        title = "Hospital-level fixed effects",
+        y.offset = 0.4,
+        geom.colors = "bw",
+        fade.ns = TRUE)
+ggsave("output/figures/SNAP2_Cancellations_Manuscript_Fig3.pdf", width = 10, height = 3.2, units = "in", dpi = 300)
+```
+
+# SUPPLEMENTARY MATERIAL
+
+## Case Record Form
+
+A copy of the Case Record Form used for data acquisition is included as a separate .pdf file named `CRF main EPICCS v1.2 20170201.pdf`.
+
+## Surgical procedures
+
+For a full list of surgical procedure names, their associated severity codes and specialties, please see the attached spreadsheet named `SNAP2_Cancellations_Procedure_Codes.csv`.
+
+## Tertiary services
+
+The following is a list of 16 services which determined whether tertiary services were provided in the hospital participating in the study, and used as a hospital-level variable in our multilevel logistic regression analysis. This list is based on specialised services commissioned by NHS England which have been grouped into six National Programmes of Care (https://www.england.nhs.uk/commissioning/spec-services/npc-crg/):
+
+  1)	Bariatric surgery
+  2)	Bone marrow transplants
+  3)	Burns care
+  4)	Cardiothoracic surgery
+  5)	Complex colorectal services, including intestinal failure
+  6)	Complex interventional cardiology
+  7)	Extracorporeal membrane oxygenation (ECMO)
+  8)	Hepatobiliary & pancreatic surgery
+  9)	Hyper-acute stroke services
+  10)	Major trauma
+  11)	Maxillofacial surgery
+  12)	Neurosurgery
+  13) Orthopaedics
+  14)	Solid organ transplants
+  15)	Upper GI surgery
+  16)	Vascular surgery
+
+## Zero-inflated Poisson model for aggregated on-the-day cancellations data
+
+We used zero-inflated Poisson regression to model the rate of on-the-day cancellations at each hospital site on each day of the study against whether the hospitals had emergency departments or enhanced care wards capable of delivering some critical care interventions outside of the ICU/HDU, adjusting for other hospital-level factors and day-of-the-week. The full model coefficients are tabled below. In the count portion of the model, Incident Rate Ratios (IRR) represent the rate of cancellations dependent on the respective variables. In the zero-inflated portion of the model, Odds Ratios (OR) represent the likelihood of excess zero cancellations occurring dependent on the respective variables.
+
+```{r SNAP2_Cancellations_Manuscript_SupplTab1, echo=FALSE}
+zeroinfl_table <- as.data.frame(exp(coef(zeroinfl_m4))) %>%
+  cbind(exp(confint(zeroinfl_m4))) %>% 
+  cbind(c(coef(summary(zeroinfl_m4))$count[,4], coef(summary(zeroinfl_m4))$zero[,4])) 
+
+colnames(zeroinfl_table) <- c("IRR/OR",
+                              "95% CI Lower Limit",
+                              "95% CI Upper Limit",
+                              "p-value")
+pander(zeroinfl_table[1:13, ], caption = "Zero-inflated Poisson model count portion.")
+pander(zeroinfl_table[14:26, ], caption = "Zero-inflated Poisson model zero-inflation portion.")
+```
+
+# List of SNAP-2: EPICCS Collaborators
+
+The following lists the names and affiliations of all collaborators who contributed to the study.
+
+## Health Services Research Centre, National Institute of Academic Anaesthesia 
+
+**Chief Investigator:**
+Prof S. Ramani Moonesinghe
+
+**Co-Investigators:**
+Dr Danny J. N. Wong, Dr Steve K. Harris
+
+**Collaborators:**
+Dr James Bedford, Dr Oliver Boney, Dr Maria Chazapis, Ms Sharon Drake, Ms Laura Farmer, Dr David Gilhooly, Mr James Goodwin, Mr Jose Lourtie, Dr Duncan Wagstaff
+
+## Study Steering Group
+
+**Chair:**
+Prof Mike Grocott
+
+**Steering Group Members:**
+Prof Robert Sneyd, Dr Anna Batchelor, Dr Stephen Brett, Ms Catherine Plowright, Mr Suman Shrestha, Mr Richard Shawyer, Dr Shafi Ahmed, Dr Mizan Khondoker, Dr Mike Nathanson
+
+## Net Solving Limited
+
+**Software Development Collaborator:**
+Mr Paul Cripps
+
+## Trainee Research Networks
+
+**Trainee Research Network Collaborators:**
+Research & Audit Federation of Trainees (RAFT), Anaesthetic Audit and Research Matrix of Yorkshire (AARMY), Intensive Care & Anaesthesia Research Network of North East Trainees (INCARNNET), Merseyside Anaesthetic Group for Improving Quality (MAGIQ), North West Research and Audit Group (NWRAG), Oxford Critical Care Anaesthetic Research Enterprise (OxCCARE), Pan-London Peri-operative Audit & Research Network (PLAN), Scottish East Quality Improvement & Research Academy (SEQuoIA), SESSA Quality Improvement and Research Network (SQUARES), Severn Trainees Anaesthetic Research (STAR), South West Anaesthetic Research Matrix (SWARM), South Yorkshire Hospitals Audit and Research Collaboration (SHARC), Southcoast Peri-operative Audit and Research Collaboration (SPARC), Welsh Anaesthetic Audit Research & Engagement Network (WAAREN), West Midlands Trainee Research Anaesthesia & Intensive Care Network (WMTRAIN)
+
+## Abertawe Bro Morgannwg University Health Board
+
+**Principal Investigator:**
+Morriston Hospital - Dr Shilpa Rawat;
+Princess of Wales Hospital - Dr Sonia Sathe;
+Singleton Hospital - Dr Alison Campbell
+
+**Collaborators:**
+Dr Janakan Anandarajah, Dr Nicola Ball, Dr Lalindra Bandara, Dr Dennis Barnes, Dr Catherine Chapman, Mrs Lynda Connor, Mrs Amanda Cook, Dr Amanda Ebejer, Miss Samantha Evans, Dr Maire Gallagher, Dr Sarah Goff, Dr Irina Halfacree, Mrs Rachel Harford, Mrs Catherine Harris, Dr Rebecca Jackson, Dr Kathryn James, Dr Claire Jones, Mrs Sharon Jones, Mrs Kathy Malinovszky, Ms Serah Mungai, Mr Hari Nageswaran, Dr Anand Perumal, Dr Harriet Pudge, Ms Leanne Quinn, Dr Thomas Sheppard, Mrs Trudy Smith, Dr James Spargo, Ms Sharon Storton, Mr Caradog Thomas, Dr Charlotte Thomas, Dr Samuel Tyrrell, Dr Owen Vale, Dr Catrin Williams, Miss Marie Williams, Dr Tom Williams, Dr Lewys Winfield-Young, Mrs Helen Worrell
+
+## Aintree University Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+University Hospital Aintree - Dr Dermot Moloney
+
+**Collaborators:**
+Dr Chandini Chuni, Dr Jasna Comara, Dr Brian Conway, Dr Zara Eagle, Dr Greg Foster, Dr Chris Platt, Dr Alison Thorne
+
+## Airedale NHS Foundation Trust
+
+**Principal Investigator:**
+Airedale General Hospital - Dr Wendy Lum Hee
+
+**Collaborators:**
+Ms Lisa Armstrong, Dr Albert Brennan, Dr Justine Burns, Dr Chantal Busby, Ms Mechele Couch-Upite, Ms Emma Dooks, Dr Sally Dunlop, Dr Anya Eijk, Dr Ramana Govindaraju, Dr Tamsin Gregory, Dr Alka Grover, Ms Brigid Hairsine, Dr Sarah Hennell, Ms Philippa Hill, Dr Thomas Hollins, Dr Julian Hood, Ms Lisa Horner, Ms Helen Hothersall, Dr Rachel Ingham, Dr Richard Jackson, Ms Amy Kitching, Ms Claire Kurasz, Ms Sarah Munsie, Dr Ildiko Nemeth, Ms Carole Paley, Dr Prabhakaran Premraj, Ms Sue Redhead, Dr John Scriven, Ms Alison Shaw, Ms Liz Shenton, Dr Hemantha Shiva, Ms Josie Snell, Ms Lucy Sootheran, Dr Josephine Stewart, Dr Frank Swinton, Dr Claire Totten, Dr Liz Varghese, Dr Sarah Vest, Dr Ben Wetherell
+
+## Aneurin Bevan Health Board
+
+**Principal Investigator:**
+Nevill Hall Hospital - Dr Vincent Hamlyn;
+Royal Gwent Hospital - Dr James Tozer
+
+**Collaborators:**
+Dr Timothy Alce, Dr Poonam Bopanna, Dr Kevin Draper, Dr Lucy Emmett, Dr Phillippa Falkner, Dr Ellie Fisher, Dr Cat Griffiths, Ms Una Gunter, Dr Rebecca Harris, Dr Saima Hashmi, Dr Helen Jewitt, Dr Sonal Lodhi, Mrs Angie Organ, Dr Elana Owen, Dr Frances Taylor, Dr Maria Tritean, Dr Richard Wassall, Dr Jade Woolley
+
+
+## Ashford & St Peters NHS Foundation Trust
+
+**Principal Investigator:**
+Ashford Hospital and St Peter's Hospital - Dr Mark MacGregor
+
+**Collaborators:**
+Mrs Claire Atkinson, Miss Maria Croft, Mrs Victoria Frost, Dr Richard George, Ms Catherine Gray, Dr Anja Kuttler, Dr Christina Lalani, Ms Beth Peers, Mrs Lisa Sharpe, Dr Christopher Skeoch, Ms Hayley Tarft, Dr Emma Tyson, Dr Martha Wrigley
+
+## Barking, Havering and Redbridge University Hospitals NHS Trust
+
+**Principal Investigator:**
+King George Hospital and Queen's Hospital - Dr Shabir Qadri
+
+**Collaborators:**
+Dr Tahir Abbas, Dr Niraj Barot, Dr Steve Cole, Dr Ritesh Ganesh, Dr Christopher Groves, Dr Lindsey Iles, Dr Hristina Petkova, Dr Clovis Rau, Dr Jack Roberts, Dr Nadeem Shakir
+
+## Barnsley Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Barnsley Hospital - Dr Sunil Kumar Chaurasia
+
+**Collaborators:**
+Dr Julia Brown, Ms Mishell Cunningham, Ms Allison Daniels, Dr Emily Gannon, Dr Annette Haines, Dr Nicola Johnson, Mr Paul Ogle, Dr Srinivasan Perumal, Ms Lisa Zeidan
+
+## Barts Health NHS Trust
+
+**Principal Investigator:**
+Newham University Hospital - Dr Hew Torrance;
+St Bartholomews Hospital - Dr Sibtain Anwar;
+The Royal London Hospital - Dr Mevan Gooneratne;
+Whipps Cross University Hospital - Dr Ashok Raj
+
+**Collaborators:**
+Dr Tom Abbott, Dr Laura Ashton, Dr Katherine Brown, Dr Emma Butterfield, Dr Jon Fenn, Dr Tim Forsyth-Jones, Dr Thomas Garth, Dr Liam Gleeson, Dr Ryan Haines, Dr Benjamin Jacobs, Dr Haren Jyothiraj, Mr Shareef Madhi, Dr Charlotte Marriot, Dr Rebecca Martin, Dr Timothy McMillan, Dr Arun Menon, Dr Otto Ernst Mohr, Dr Maria Muelmenstaedt, Mr Hanzla Naeem, Dr Myura Nagendram, Dr Cormac O'Connor, Dr Ching Pang, Dr Kimberley Plummer, Mr Zak Rob, Dr Dan Sellers, Dr Michael Shaw, Dr Christopher Smith, Dr Tom Taylor, Dr Priya Thorat, Dr Gerhardus Van Rensberg, Dr Sophie Walker, Dr Farkhunda Waqas, Dr Peter Wicks, Dr Daniel Wirth
+
+## Basildon and Thurrock University Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Basildon University Hospital and Essex Cardiothoracic Centre - Dr Samuel Armanious
+
+**Collaborators:**
+Ms Kellie Allen, Mr Salvatore Bruni, Dr Keshava Reddy Burijinti Chenna, Dr Agilan Kaliappan, Ms Madelaine Ocampo, Dr Adrian Percuin, Ms Joanne Riches, Mr Louie Saclot, Ms Annaliza Sevillano, Mr Mark Vertue
+
+## Bedford Hospital NHS Trust
+
+**Principal Investigator:**
+Bedford Hospital - Dr Peter Knowlden
+
+**Collaborators:**
+Mrs Beena David, Dr Pushpaj Gajendragadkar, Dr George Gladstone, Dr Henry Hammerbeck, Mrs Marina Iaverdino, Ms Carina Lilley, Dr Ben Linton-Willoughby, Dr Daniel Murrell, Dr Shweta Patro, Dr Susanna Richie-Mclean, Dr Marc Turnbull, Dr Padmanabhan Vatsala
+
+## Belfast Health and Social Care Trust
+
+**Principal Investigator:**
+Royal Victoria Hospital - Dr Killian McCourt
+
+**Collaborators:**
+Dr Nick Black, Dr Ciara Coary, Dr Jonathan McCarter, Dr Alexandra Murphy
+
+
+## Betsi Cadwaladr University Health Board
+
+**Principal Investigator:**
+Glan Clwyd Hospital - Dr Richard Pugh;
+Wrexham Maelor Hospital - Dr Chris Littler;
+Ysbyty Gwynedd - Dr Stephan Clements
+
+**Collaborators:**
+Dr Linda Bairkdar, Dr Gillian Bennett, Dr Tom Bird, Ms Annette Bolger, Dr King Dhar, Dr Raluca Ene, Dr David George, Dr Dhania Haron, Ms Lucie Hobson, Dr Saba Iqbal, Dr Lizzie Irvine, Ms Sion Lewis, Dr Roisin McCallum, Dr Benjamin O'Donovan, Dr Christopher Patrick, Dr Christopher Perman, Dr Nowfal Rahman, Dr Iolo Roberts, Dr William Sutcliffe, Dr Tammy Towers, Dr Alicia Waite, Ms Stella Wright
+
+## Birmingham Women's NHS Foundation Trust
+**Principal Investigator:**
+Birmingham Women's Hospital - Dr Jane Pilsbury
+
+**Collaborators:**
+Dr Michael Allan, Ms Cody Allen, Ms Nikkita Carden, Ms Amanda Cotterill, Dr Kerry Cullis, Dr Daniel Eden, Ms Nicola Farmer, Ms Andrea Galloway, Dr James Geoghegan, Dr Ahmed Gilani, Ms Kelly Hard, Dr Khalid Hasan, Dr Christopher Horner, Ms Virginia Iqbal, Ms Julie Lowe, Dr Ravindra Mallavalli, Ms Shanteela McCooty, Ms Sian McKillop, Ms Diane Mellers, Dr Ronan Mukherjee, Dr Michelle Nicholas, Ms Chloe O'Hara, Dr Fiona Osborne, Dr Emma Plunkett, Dr Gauhar Sharih, Dr John Westwood, Dr Annabelle Whapples, Ms Diane Whitehouse, Dr Lucinda Williams, Dr Bilal Yasin
+
+## Blackpool Teaching Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Blackpool Victoria Hospital - Dr Jason Cupitt
+
+**Collaborators:**
+Miss Janette Brown, Mrs Emma Stoddard
+
+## Bolton Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Bolton Hospital - Dr Madhu Balasubramaniam
+
+**Collaborators:**
+Dr Paul Athanasopoulos, Dr Mohammad Bhatti, Dr Laura Blood, Dr Hugo Buckley, Mrs Julie Chadwick, Mrs Shirley Cocks, Dr Deborah Fradkin, Mrs Emily Hetherington, Miss Rebecca Hill, Mr Rob Hull, Mrs Alison Loftus, Miss Emma McKenna, Dr Lucy Mcmanoman, Dr Lauren Milian, Mrs Raksha Mistry, Mrs Lisa Murthen, Mr Dave Parkinson, Miss Kat Rhead, Dr Peter Sandbach, Dr Ciara Walker, Dr Emma Wheatley
+
+## Bradford Teaching Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Bradford Royal Infirmary - Dr Robert Spencer
+
+**Collaborators:**
+Dr Stephen Alderson, Dr Christopher Bull, Dr Rachel Butterworth, Dr Simon Cousins, Dr Sarah Goellner, Dr Mark Greasley, Dr Fiona Lyle, Dr Michael Munro, Mr Martin Northey
+
+## Brighton and Sussex University Hospitals NHS Trust
+
+**Principal Investigator:**
+Princess Royal Haywards Heath, Royal Sussex County Hospital and Sussex Orthopaedic Treatment Centre - Dr Stuart White
+
+**Collaborators:**
+Dr Alex Harrison, Dr Paul-Simon Whitney
+
+## Buckinghamshire Healthcare NHS Trust
+
+**Principal Investigator:**
+Stoke Mandeville Hospital and Wycombe Hospital - Dr Jeremy Drake
+
+**Collaborators:**
+Dr Rohan Babla, Dr Ash Bharti, Dr Stephen Cole, Dr Stephen Crotty, Dr Amy Farrow, Dr Anil Golhar, Dr Peter Indoe, Dr Rosada Jackson, Dr Mariam Latif, Dr Melvin Leong, Dr Henry Lewith, Dr Matthew Maton-Howarth, Dr Victoria Millar, Dr Ben Millette, Dr Hannah Oliver, Dr Vandita Ralhan, Dr Yasir Rashid, Dr Maria Rivero-Bosch, Dr Sana Rizvi, Dr Rosahn Saleh, Dr Harisg Venkatesh, Dr Kate Wilson
+
+## Burton Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Queen's Hospital - Dr Ashok Nair
+
+**Collaborators:**
+Mrs Precious Basvi, Mrs Gillian Bell, Dr James Edwards, Dr David Lee, Dr Guanmei Luo, Miss Clare Mewies, Dr Arif Qureshi, Dr Behzad Sohail, Dr Sachin Valap
+
+## Calderdale and Huddersfield NHS Foundation Trust
+
+**Principal Investigator:**
+Calderdale Royal Hospital and Huddersfield Royal Infirmary - Dr Stephen Hill
+
+**Collaborators:**
+Dr Deepti Bhuwanee, Dr James Chan, Dr John Dereix, Dr Allen George, Dr Tasmeen Ghafoor, Dr Emma Gold, Dr Daniel Haigh, Dr David Harding, Dr Bhavia Janardhana, Dr Jithu Jayan, Dr James King, Dr Pnt Laloë, Dr Lauren Pearce, Dr Amit Pruthi, Dr Eleanor Roscoe, Dr Deepak Seharawat, Dr Mark Stubbington, Dr Vinayak Vanjari, Dr Anantharaman Venkataraman, Dr Serena Yen
+
+## Cambridge University Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Addenbrooke's Hospital - Dr Vishal Patil
+
+**Collaborators:**
+Dr Charles Chan, Dr Garry Davenport, Dr Peter Featherstone, Dr Petrus Fourie, Dr Christopher Hall, Dr Preeti Mahidik, Dr Elisa Masoni, Dr Andrea Ortu, Dr Anita Patil, Dr Janet Pickett, Dr Sandeep Sharma
+
+## Cardiff and Vale University Health Board
+
+**Principal Investigator:**
+University Hospital of Wales - Dr Naomi Goodwin
+
+**Collaborators:**
+Dr Lucy Allen, Dr Nathan Anderson, Dr Ethan Bateson, Dr Sanchita Bhatia, Dr Sara Churchill, Dr Leon Cohen, Dr Patrick Colhoun, Dr Charlotte Dunn, Dr Carys Durie, Dr Sarah Elgarf, Dr Jenny Ferry, Dr Jeremy Guilford, Dr Claire Halligan, Dr Jade Harrison, Dr Dominic Hayes, Dr Ben Holst, Dr Rhys Hughes, Dr Thomas Hunt, Dr John Jackson, Dr George Kohler, Dr Michael Kriger, Dr Svetlana Kulikouskaya, Dr Amit Kurani, Dr Charlotte Maden, Dr Alex Moore, Dr Adam Mounce, Dr Alice O'Donnell, Dr Robert Sparrow, Dr Jayne Sutherland
+
+## Central Manchester University Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Manchester Royal Infirmary - Dr James Hanison;
+Saint Mary's Hospital - Dr Sujesh Bansal;
+Trafford General Hospital - Dr Nick Greenwood
+
+**Collaborators:**
+Dr Mahmoud Alkholany, Dr Zoe Apple, Miss Anam Asif, Dr Neeraj Bhardwaj, Dr Karl Braid, Dr Rebecca Coates, Dr Liliana Czukowska, Dr Lauren Elliott, Dr Li Fang, Dr Hannah Greenlee, Dr Nick Greenwood, Mrs Jashmin Maria, Dr Tarek Mostafa, Dr Amarjeet Patil
+
+## Chelsea and Westminster Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Chelsea and Westminster Hospital - Dr Andrea Weigert;
+West Middlesex University Hospital - Dr Alexandra Matson
+
+**Collaborators:**
+Mrs Christine Adamson, Dr Philip Barclay, Mrs Amy Barker, Mrs Carina Bautista, Mr Suman Biswas, Miss Rhian Bull, Mr Jaime Carungcong, Dr Fenner Christoper, Miss Elna Cifre, Dr Olivia Clancy, Dr Lauren Friedman, Dr Gabriella Frunza, Dr Sadia Habib, Miss Hindusha Keerthikumar, Mrs Ursula Kirwan, Dr Helen Laycock, Dr Sarah Leir, Mr Victor Maduekwe, Mrs Carmela Martella, Miss Minna Meritahti, Mrs Kribashnie Nundlall, Mr Metod Oblak, Dr Kirat Panesar, Dr Timothy Peters, Dr Eleanor Pett, Dr Catriona Routley, Dr Amee Samani, Dr Vatsharlan Santhirapala, Mrs Amrinda Sayan, Dr Alice Sisson, Mrs Marie-Louise Svensson, Mrs Mini Thankachen, Mrs Bernadette Tilley, Dr Charlotte Topham, Miss Sathya Visvendra, Dr Anna Warrington, Dr Andrea Weigert, Dr Helen Wibberley
+
+## Chesterfield Royal Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Chesterfield Royal Hospital - Dr Nick Spittle
+
+**Collaborators:**
+Dr Mia Andrews, Dr Sarah Beavis, Dr Daiva Bernotaitis, Dr Shalini Chinna, Dr Helen Church, Ms Sian Edwards, Ms Nicky Ford, Ms Sarah Hazeldine, Dr James Hudson, Ms Claire Macey, Dr Matthew Morgans, Ms Julie Toms, Ms Amanda Whileman, Mrs Jan Woodward, Ms Stephanie Wright
+
+## The Christie Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+The Christie Hospital - Dr Jaya Nariani
+
+**Collaborators:**
+Dr Sam Clark, Dr Larysa Duniec
+
+## City Hospitals Sunderland NHS Foundation Trust
+
+**Principal Investigator:**
+Sunderland Royal Hospital - Dr Marc Slorach
+
+**Collaborators:**
+Mrs Ashley Allan, Dr Bryony Burrill, Dr Lynn Fairless, Dr Nicholas Francis, Dr Colin McAdam, Miss Julie Sheriff
+
+## Colchester Hospital University NHS Foundation Trust
+
+**Principal Investigator:**
+Colchester General Hospital - Dr Thomas McLoughlin
+
+**Collaborators:**
+Dr Shayan Arshed, Dr Clare Bird, Ms Debbie Campbell, Mrs Elaine Chinery, Dr Enoch Onya, Dr Ryan Perry, Dr Jose Miguel Sabugueiro, Dr Lydia Shatanda, Dr Muzaffar Sheik, Dr Jo simpson, Dr Gabriela Wong, Dr Chen Yun-Han
+
+## Countess of Chester NHS Foundation Trust
+
+**Principal Investigator:**
+Countess of Chester Hospital - Dr Lawrence Wilson
+
+**Collaborators:**
+Dr Duncan Adshead, Dr David Castillo, Mrs Maria Faulkner, Dr Kim Gibson, Dr Tara Keogh, Dr Sam Michlig, Dr Elizabeth Perritt, Dr Simon Ridler, Dr Kate Tizzard, Dr Anne Troy
+
+## County Durham and Darlington NHS Foundation Trust
+
+**Principal Investigator:**
+Darlington Memorial Hospital - Dr Amir Rafi;
+University Hospital of North Durham - Dr Helen Melsom
+
+**Collaborators:**
+Mrs Vikki Atkinson, Dr Tariq Azad, Dr Vladimir Bashliyski, Mrs Ellen Brown, Ms Sarah Clark, Sister Amanda Cowton, Mrs Jill Deane, Mrs Jean Dent, Dr Karin Duckett, Mrs Louise Duncan, Mr Nicholas Hooper, Dr Tom Johnson, Mrs Andrea Kay, Dr Donna Kelly, Mrs Melanie Kent, Dr Jo Knight, Dr Christina McCarroll, Miss Annie Newby, Mrs Kathryn Potts, Dr James Roe, Mr David Rollins, Ms Asia Sarwar, Dr Lewis Schofield, Dr Deborah Skelton, Dr Sameer Somanath, Dr Peter Taysum, Ms Julie Temple, Dr William Udall, Ms Jane Varin, Dr Lucy Venyo, Mr Martin Warin, Mrs Shelly Wood
+
+## Croydon Health Services NHS Trust
+
+**Principal Investigator:**
+Croydon University Hospital - Dr Srinivasan Dhileepan
+
+**Collaborators:**
+Dr Ravishankar Jakkala Saibaba, Dr Emma Stewart, Dr Eleanor Warwick
+
+## Cwm Taf University Health Board
+
+**Principal Investigator:**
+Prince Charles Hospital & Royal Glamorgan Hospital - Dr Omar Alex Pemberton
+
+**Collaborators:**
+Dr Maryna Garmash, Dr Rhys Griffiths, Dr Suzi Hale, Dr Fatma Lahloub, Dr Ceri Lynch, Dr Abbas Majeed, Dr Ifan Patchell, Dr Jennifer Quinton, Dr Babak Sedghi, Dr Stephanie Wallis
+
+## Dartford and Gravesham NHS Trust
+
+**Principal Investigator:**
+Darent Valley Hospital - Dr Sange Mansoor
+
+**Collaborators:**
+Dr Zakaulla Belagodu, Dr Shirin Dastur, Ms Bridget Fuller, Mrs Imogen Hayes, Dr Ashwini Keshkamat, Dr Georgia Monantera, Dr Roxana Sandhar, Dr Shamini Sivakumaran, Dr Megan Thomas, Dr Manish Torne, Mrs Sherma Turner, Ms Phillipa Wakefield,
+
+## Derby Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Derby Hospital - Dr David Rogerson
+
+**Collaborators:**
+Mrs Catherine Addleton, Mrs Lisha Aju, Mrs Marie Appleby, Mrs Elizabeth Barnes, Mrs Trish Boateng, Dr Laura Carrick, Mrs Elaine Coulborn, Miss Rebecca Darbyshire, Mrs Charlotte Downes, Miss Jodie Fitzgerald, Mrs Linda Hall, Mrs Laura Harvey, Dr Amr Hassan, Mrs Kathleen Holding, Miss Lianne Hufton, Mrs Louise Humphries, Mr Ryan Humphries, Mr Laurence Inman, Mrs Nicole Issit, Mrs Sarah Longhurst, Mrs Melody MacGregor, Mrs Trusha Mistry, Mrs Mona Mohamed, Miss Charlene Otieno, Dr David Read, Miss Michelle Scott, Miss Abbie Singleton, Mrs Jill Smith, Miss Aariana Sohal, Mr Samson Tou, Mrs Vanessa Unsworth, Mr Richard Wan, Mr Christopher Worth
+
+## Doncaster and Bassetlaw Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Doncaster Royal Infirmary - Dr Richard Dobson
+
+**Collaborators:**
+Dr Rose Buckley, Miss Rachel Codling, Mr Cain Hunter, Dr Jenny Jackson, Dr Caroline Lowrie, Dr Catherine McMillan, Dr Raj McNab, Dr Max Richardson, Dr James Sylvester, Dr Anna Watkin
+
+## Dorset County Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Dorset County Hospital - Dr Jonathan Chambers
+
+**Collaborators:**
+Mrs Rachel Bown, Mr Colin Christie, Ms Stephanie Dukes, Mrs Sarah Horton, Mr Andrew Rees, Mrs Patricia Williams, Mrs Sarah Williams
+
+## The Dudley Group NHS Foundation Trust
+
+**Principal Investigator:**
+Russells Hall Hospital - Dr Richard Pierson
+
+**Collaborators:**
+Dr Nipun Agarwal, Mrs Clare Allcock, Dr Irmeet Banga, Mrs Kirsty Baron, Mrs Andrea Cole, Dr Santinder Dalay, Mrs Ranjit Gidda, Dr Phillip Lo, Mrs Susan Merotra, Dr Kathryn Newton, Dr Zoe Riddell, Dr Julian Sonksen
+
+## East and North Hertfordshire NHS Trust
+
+**Principal Investigator:**
+Lister Hospital - Dr Sunil Jamadarkhana
+
+**Collaborators:**
+Miss Chanice Alcock, Dr Wei Lin Allen, Mrs Pearl Baker, Mrs Hannah Beadle, Dr Jon Bramall, Dr Radu Chiravasuta, Miss Amina Chohan, Mrs Angela Christofides, Mrs Angela Cook, Mrs Janet Cotta, Miss Carina Cruz, Mrs Jemma Gilmore, Mrs Vicky Hills, Dr Kathryn King, Dr Lucy McClelland, Dr Sei Nishimura, Mrs Rumyana Nyathi, Dr Prasan Panagoda, Mrs Louise Peacock, Mrs Emma Shinn, Miss Sophie Spencer, Mrs Mayumi Vianzon
+
+## East Kent Hospitals University NHS Foundation Trust
+
+**Principal Investigator:**
+Kent and Canterbury Hospital - Dr Ritoo Kapoor;
+Queen Elizabeth The Queen Mother Hospital - Dr Nagendra Natarajan;
+William Harvey Hospital - Dr Joanna Moore
+
+**Collaborators:**
+Dr Freda Amoakwa-Adu, Dr Sinan Bahlool, Ms Tracey Cosier, Ms Sarah Driscoll, Dr Claudia Dulea, Dr Andrew Feneley, Dr Marcus Fletcher, Dr Walid Hammad, Ms Tracy Hazelton, Dr Kim Hoyland, Dr Bennur Katyayani, Dr Catherine Lloyd, Mrs Angela Moon, Ms Janine Musselwhite, Dr Ganesh Nair, Mr Joshua O'Donnell, Dr Pushkar Patankar, Dr Katy Redington, Dr Aalia Sange, Dr Mark Snazelle, Dr Vanja Srbljak, Dr Richard Stead, Dr Ismail Tariq, Dr Janine Thomas, Ms Sharon Turney
+
+## East Lancashire Hospitals NHS Trust
+
+**Principal Investigator:**
+Burnley General Teaching Hospital - Dr Srikanth Chukkambotla;
+Royal Blackburn Teaching Hospital - Dr Aji Mathew and Dr Jason Lie
+
+**Collaborators:**
+Dr Zackriah Badsha, Ms Sam Bews, Dr Kumud Bhandari, Ms Catherine Cartmell, Dr Greg Cox, Hawa Desai, Dr Mark Doran, Mr Stephen Duberley, Ms Jill Fitchett, Ms Diane Forrest, Dr David Freeman, Dr Asif Gani, Ms Catherine Gedling, Ms Jessica Giles, Ms Wendy Goddard, Ms Linda Gregson, Ms Yvonne Grimes, Ms Bev Hammond, Ms Janice Hartley, Ms Gemma Hudson, Dr Ramez Ibrahim, Nasreen Iqbal, Ms Karen Jewers, Dr Brian Johnston, Dr Abhishek Kakkar, Dr Istvan Koczka, Mr Matt Lovell, Dr Mohamad Mahmoud, Ms Cathie Melvin, Mr Matt Milner, Ms Nicky Moss, Dr Jeet Patel, Dr David Perry, Dr Mike Pollard, Dr Stephanie Reed, Dr Gillian Rennie, Ms Karen Riley, Dr Sherrie Samuels, Dr Ioana Simionescu, Dr Lorna Sissons, Dr Stephen Traynor, Dr Daniel Tucker, Dr Glenn Vetuz, Ms Gillian Whalley
+
+## East Sussex Healthcare NHS Trust
+
+**Principal Investigator:**
+Conquest Hospital and Eastbourne District General Hospital - Dr Philippa Marshall
+
+**Collaborators:**
+Dr Tim Arnold, Dr Jamie Brookes, Mrs Anne Cowley, Dr Ruth Delascasas, Mrs Emma Edmunds, Dr Dominic Espitalier-Noel, Dr Rajeev Jeevananthan, Mrs Jenni Law, Mrs Kelly Mintrim, Dr Jack Reid, Mrs Jackie Terry, Dr Manish Verma, Dr Jean-Paul Zahra
+
+## Epsom and St Helier University Hospitals NHS Trust
+
+**Principal Investigator:**
+Epsom General Hospital and St Helier Hospital - Dr Geoff THORNING
+
+**Collaborators:**
+Dr John Bailes, Dr Lindsay Dawson, Dr Clare Donovan, Dr Jo Han Gan, Dr Kaya Jeyarajah, Dr Andrew Selman
+
+## Frimley Health NHS Foundation Trust
+
+**Principal Investigator:**
+Frimley Park Hospital - Dr Justin Woods;
+Wexham Park Hospital - Dr Peter Csabi
+
+**Collaborators:**
+Dr Yin Yong Choo, Mrs Saheli Das, Mrs Clare Denford, Dr Mihir Desai, Dr Rahul Dimber, Dr Khaled Ellisy, Dr Ben Griffiths, Dr Sindy Lee
+
+## Gateshead Health NHS Foundation Trust
+
+**Principal Investigator:**
+Queen Elizabeth Hospital - Dr Vanessa Linnett
+
+**Collaborators:**
+Dr Alex Daniels, Dr Sadie Perkin, Sister Jenny Ritzema, Sister Bryony Storey, Dr Christine Wood
+
+## Gloucestershire Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Cheltenham General Hospital - Dr Robert Orme;
+Gloucestershire Royal Hospital - Dr Sock Koh
+
+**Collaborators:**
+Dr Charis Banks, Dr Oliver Barker, Mrs Susan Beames, Dr Aislinn Brown, Dr Lucy Corbett, Dr James Dalton, Dr Fiona Davis, Mr Matthew Edmunds, Dr Will Gatfield, Dr Edmund Gerrans, Dr Tom Hickish, Dr Emily Hignell, Mrs Paula Hiltout, Dr Helen Johnston, Mr Sam Miller, Dr Jo Mullender, Mrs Susan O'Connell, Dr Kath Rosedale, Dr Katie Samuel, Dr Milena Vannahme
+
+## Great Western Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Great Western Hospital - Dr Gary Baigel
+
+**Collaborators:**
+Ms Sarah Grayland, Dr Victoria Hawley, Ms Laura McAffrey, Ms Suzannah Peggler, Mr Joe Stevens
+
+## Guy's and St Thomas' NHS Foundation Trust
+
+**Principal Investigator:**
+Guy's Hospital - Dr Heena Bidd;
+St Thomas' Hospital - Dr Kariem El-Boghdadly and Dr Liana Zucco
+
+**Collaborators:**
+Ms Yemi Adelaja, Dr Sanjoy Bhattacharyya, Dr Elsie Bickmore, Dr Suzanne Body, Dr Jenny May-Ling Cheung, Dr Priaykam Chowdhury, Dr Joshua Cuddihy, Ms Ndi Ekwere, Ms Ange Lise John-Baptiste, Dr Paul Kelly, Dr Daniel Leslie, Dr Wint Mon, Ms Natasha Muzengi, Dr Cheng Ong, Dr Nisha Pattni, Dr Thomas Potter, Dr Elena Stanton, Dr Maryam Zaky
+
+## Hampshire Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Basingstoke and North Hampshire Hospital - Dr Richard Partridge;
+Royal Hampshire County Hospital - Dr Helen Bromhead
+
+**Collaborators:**
+Dr Peter Evans, Miss Denise Griffin, Dr J. Joseph Kinsella, Dr Alexander Knight, Dr Rosemary Anna Lewis, Dr Heidi Lightfoot, Ms Jane Martin, Mr McDonald Mupudzi, Miss Katherine Nahajski, Dr Segun Oladele, Dr Julia Ottaway, Dr Stephen Petley, Dr Ian Sheldrake, Dr Alexander Michael Stewart, Dr Aaron Stokes, Ms Dawn Trodd, Dr Nimu Varsani, Dr Eleanor Walshe, Ms Caroline Wrey Brown
+
+## Harrogate and District NHS Foundation Trust
+
+**Principal Investigator:**
+Harrogate District Hospital - Dr Martin Huntley
+
+**Collaborators:**
+Dr Natalie Baldry, Ms Caroline Bennett, Dr Sophie Earl, Ms Joyce Guy, Mrs Maggie Peat, Mrs Lorraine Stephenson, Dr Hao Ern Tan, Mrs Louise Wills, Ms Michelle Yare
+
+## Heart Of England NHS Foundation Trust
+
+**Principal Investigator:**
+Good Hope Hospital, Birmingham Heartlands Hospital and Solihull Hospital - Dr Joyce Yeung
+
+**Collaborators:**
+Dr Supriya Antrolikar, Ms Katie Atterbury, Dr Fayaz Baba, Ms Hollie Bancroft, Ms Safia Begum, Ms Mary Bellamy, Dr Keith Couper, Ms Lucy Evans, Ms Rachel Flight, Dr Catriona Frankling, Dr Srikant Ganesh, Ms Joanne Gresty, Ms Ruth Joslyn, Ms Salma Kadiri, Dr Aalisha Mariam Karimi, Ms Amy Kerr, Ms Teresa Melody, Ms Faye Moore, Dr Jennifer Morrish, Ms Mary O'Sullivan, Dr Vanisha Patel, Ms Eleanor Reeves, Dr Richard Robley, Ms Julia Sampson, Ms Mirriam Sangombe, Mr Vusumuzi Shabangu, Ms Lucy Sheppard, Ms Sam Stafford, Mr Peter Sutton, Ms Joanne Taylor, Dr James Turner, Dr Rochelle Velho, Ms Joanne Webb, Ms Linda Webber, Dr Ewa Werpachowska, Ms Lisa Wilkinson-Guy
+
+## The Hillingdon Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Hillingdon Hospital - Dr Constandinos Papageorgiou
+
+**Collaborators:**
+Mrs Sohan Bisonoothan, Dr Emma Casely, Mrs Carina Casey, Dr Elisa Kam, Mrs Geraldine Landers, Mrs Laura Pearse, Dr Meera Raja, Dr Daniel Solomon, Dr Plamen Stoyanov
+
+## Homerton University Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Homerton University Hospital - Dr Chiraag Talati
+
+**Collaborators:**
+Dr Hari Arunachalam, Dr Victoria Ashton, Dr Jens Full, Dr Samira Green
+
+## Hull and East Yorkshire Hospitals NHS Trust
+
+**Principal Investigator:**
+Hull Royal Infirmary - Dr Andrew Gratrix
+
+**Collaborators:**
+Mrs Caroline Abernethy, Dr Abigail Clarke, Dr Pallavbhai Desai, Mrs Victoria Martinson, Dr Ravi Parekh, Dr Mirain Phillips, Dr Anju Raina, Dr Sarah Raut, Dr Chris Smales, Mr Neil Smith, Dr Ruth Ugochukwu, Dr Matt Willis
+
+## Hywel Dda Health Board
+
+**Principal Investigator:**
+Bronglais Hospital - Dr Zhana Ignatova;
+Glangwili General Hospital - Dr Stuart Gill;
+Withybush Hospital - Dr Sunita Agarwal
+
+**Collaborators:**
+Dr Harry Barclay, Dr Brian Campbell, Dr Maggie Collingborn, Dr Richard Dagnan, Dr David Steven, Davies, Dr Randeep Dhaliwal, Dr Ishan Dharmarathna, Dr Yuvraj Doriaswami, Dr Hywel Evans, Dr Ahmed Foly, Dr John Francis, Dr Tim Green, Dr Ahmed Hassanin, Dr Peter Havalda, Dr Ahmad Huda, Dr Beryl Jones, Dr Ramesh Khoju, Dr Maria Lackmann, Dr Kofi Mensah, Dr Christopher Nwaefulu, Dr Ilona Schmidt, Dr Gopinath Selvraj, Dr Norbert Skarbit, Dr Obla Suganthi, Dr Jacek Zeber
+
+## Imperial College Healthcare NHS Trust
+
+**Principal Investigator:**
+Charing Cross Hospital and St Mary's Hospital - Dr Vidhya Nagaratnam;
+Hammersmith Hospital - Dr Smitangshu Mukherjee;
+Queen Charlotte's and Chelsea Hospital - Dr Sue Kirby
+
+**Collaborators:**
+Dr Glenn Arnold, Dr Daniel Bendel, Dr Claire Boynton, Dr Stephen Brett, Dr James Carvell, Dr Anthony Carver, Dr Matt Clayton, Ms Keyury Desai, Dr Fiqry Fadhlillah, Dr Christiana Georgiou, Dr Vineetha Jayakumar, Dr Lara Jeanes, Dr Mhairi Jhugursing, Dr Jasmine Jose, Dr Emma Karsten, Dr Flora Kormendy, Ms Stephanie Lewis, Dr Dafydd Lloyd, Mrs Francisca Mautadin, Dr Claire McCahill, Ms Susan McInerney, Ms Laura Morland, Dr Elaine Morsman, Dr Sunny Nayee, Dr David O'Callaghan, Ms Emily Pickford, Mrs Bhavesh Pratap, Dr Chandana Rao, Ms Alka Shah, Dr Stephen Smith, Dr Claire Smyth, Dr Icel Souleimanova, Ms Maie Templeton, Dr Kavita Upadhyaya, Dr Sophie Uren, Dr Shree Voralia, Dr Rebecca Wilson
+
+## Ipswich Hospital NHS Trust
+
+**Principal Investigator:**
+Ipswich Hospital - Dr Vlad Kushakavsky
+
+**Collaborators:**
+Dr Justin Ang, Mrs Debroah Beeby, Mrs Stephanie Bell, Dr Helen Boys, Miss Sue Brixey, Mrs Cathleen Chabo, Dr Lynsey Cubitt, Ms Maggie Dawson, Mrs Jenny Finch, Dr Robert Lewis, Mrs Bally Purewal, Dr Kaung Pyae, Ms Judi Ramsey, Dr Ben Scoones
+
+## Isle of Wight NHS Trust
+
+**Principal Investigator:**
+St Mary's Hospital - Dr Gabor Debreceni
+
+**Collaborators:**
+Dr Obaid Tarin and Ms Nicola Zondo
+
+## James Paget University Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+James Paget University Hospital - Dr Pieter Bothma
+
+**Collaborators:**
+Dr Jack Carmichael, Miss Teresa Ferreira, Miss Kelly Goffin, Dr Sarada Gurung, Dr Ashish Kundu, Dr Sarah MacLennan, Dr Theresa Murray , Dr Karan Verma, Dr Graeme Wilson, Dr Aleinmar Winthein
+
+## Kettering General Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Kettering General Hospital - Dr Satyanarayan Jakkampudi
+
+**Collaborators:**
+Dr Muneeba Ahmed, Dr Duncan Baines, Mrs Charmaine Beirnes, Miss Chrissy Braybrook, Miss Olga Fernandez, Mrs Jayshree Gracey, Dr Snehasish Guha, Dr Arihant Jain, Dr Raghavendran Krishnaiyan, Dr Thomas Moody , Mrs Jo Novaga, Dr Frances Tait, Miss Jemma Tate, Dr Jennifer Claire Taylor, Miss Molly Waldron, Mrs Sonia White
+
+## King's College Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+King's College Hospital and Orpington Hospital - Dr Anish Gupta;
+Princess Royal University Hospital - Dr Claire Botfield
+
+**Collaborators:**
+Dr Mohamed Ahmed, Dr Lizzie Ashton, Dr Andrew Robert Bailey, Dr Pele Banugo, Ms Sian Birch, Dr Henry Boyle, Dr Alice Brown, Dr Mark Chen, Dr Lucy Connolly, Dr Viral Dalal, Dr Alexandra Edwards, Dr Shaima Elnour, Dr Timothy Faccini, Dr Theodore Floyd, Dr Thomas Georgiou, Dr James Gill, Dr Russell Hedley, Dr Philip Hopkins, Dr Roshmi Kumar, Dr Alice Michell, Dr Rhiann Marie O'Shaughnessy, Dr Laura O'Sullivan, Dr Seema Pai, Dr Benjamin Parsons, Dr Laura Peltola, Ms Beth Penhaligan, Dr Merate Place, Dr Jonathan Ramsden, Dr Gamunu Ratnayake, Dr Kathy Shammas, Dr Ali Watts, Dr Thomas Williams, Dr Valantine Woodham
+
+## Kingston Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Kingston Hospital - Dr Sarang Puranik
+
+**Collaborators:**
+Ms Jennifer Crooks, Dr Ania Dean, Dr Chris Honstvet, Dr Katherine Hunter, Dr Sarah Steynberg, Mr Andrew Swain
+
+## Lancashire Teaching Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Preston Hospital - Dr Shondipon Laha
+
+**Collaborators:**
+Dr Alex Bonner, Ms Donna Doyle, Dr Robert Fallon, Mr Mark Verlander, Miss Alexandra Williams, Dr Richard Yardley
+
+## Leeds Teaching Hospitals NHS Trust
+
+**Principal Investigator:**
+Leeds General Hospital and St James' University Hospital - Dr Simon Whiteley
+
+**Collaborators:**
+Dr Zaid Ahmed, Dr Ossian Aukland Child, Dr Sheila Black, Mr Jamie Calderwood, Dr Andy Chapman, Dr Robert Collin, Ms Kinga Dwornik, Dr Kate Gallagher, Dr Michelle Gardener, Mr Gareth Harrop, Dr Peter Hart, Mrs Clare Howcroft, Dr Carl Ilyas, Dr Umakanth Kempanna, Dr Gnanshree Krishnamurthy, Dr Paramesh Kumara, Dr LI Lian Loh, Dr James Morgan, Dr Jonathan Pipe, Dr Anand Sathiapillai, Dr John Stones, Mrs Elizabeth Wilby
+
+## Lewisham and Greenwich NHS Trust
+
+**Principal Investigator:**
+Queen Elizabeth Hospital - Dr Buzz Shephard;
+University Hospital Lewisham - Dr Manju Agarwal
+
+**Collaborators:**
+Dr Tatyana Bolonenkova, Dr Lisa Dunlop, Dr Karthick Duraisamy, Dr Jenna Kelly, Dr Eveliina Nurmi, Dr Mitul Patel, Dr Jonathan Perry, Dr Charles Prior, Mrs Rosie Reece-Anthony, Dr Bernd Oliver Rose, Dr Katie Rowland, Dr Jennifer Van Ross
+
+## Liverpool Women's NHS Foundation Trust
+
+**Principal Investigator:**
+Liverpool Women's Hospital - Dr Helen McNamara
+
+**Collaborators:**
+Dr Natasha Permall, Dr Gillian Robertson, Dr Sarah Siew, Miss Amy Smith, Ms Sue Spearritt, Dr Dipali Verma, Dr Rhys Williams
+
+## Luton and Dunstable University Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Luton and Dunstable Hospital - Dr Suhail Zaidi
+
+**Collaborators:**
+Dr Samantha Clayton, Dr James Goddin, Dr Stuart Joy, Dr Vikram Malhotra, Dr Samuel Mindel, Dr Zoe Neilson, Dr Shanelle Tharuka Wijesuria, Dr Ryan Wilkins
+
+## Medway NHS Foundation Trust
+
+**Principal Investigator:**
+Medway Maritime Hospital - Dr Kirtida Mukherjee
+
+**Collaborators:**
+Dr Andrew Bradley, Mrs Samantha Coetzee, Dr Alexandra Crook, Mrs Eunice Emeakaroha, Dr Marek Frenkiel, Mr Tom Hatton, Dr Kootharajan Kamraj, Miss Natalie Long, Dr Badrinath Manikundalam, Dr Muditha Peiris, Ms Catherine Plowright, Dr Matthew Roche, Mr Banher Sandhu, Dr Nichola White, Mrs Annette Woods, Dr Adam Yarnold
+
+## Mid Cheshire Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Leighton Hospital - Dr Nicolas Price
+
+**Collaborators:**
+Dr Marion Ashe, Dr Tom Disney, Ms Caroline Dixon, Dr Emily Dodds, Dr Sarah El-Sheika, Dr Yasir Hameed, Dr Rob Jones, Dr Karan Kanal, Dr Sanjeewa Ranaweera, Dr Simon Ripoll, Dr Nicki Russell, Ms Sally Anne Smith, Dr Swee Ang Tung
+
+## Mid Essex Hospital Services NHS Trust
+
+**Principal Investigator:**
+Broomfield Hospital - Dr Bruce Emerson
+
+**Collaborators:**
+Ms Victoria Apps, Ms Mandy Austin, Dr Laura Catchpole, Mrs Christine Catley, Miss Jenny Child, Mrs Karen Cranmer, Ms Lizzie Dawson, Miss Beth Farr, Ms Helen Gerrish, Ms Sian Gibson, Ms Jacqueline Gunn, Mrs Kim Holland, Ms Lorri James, Dr Dushyanthi Jayasekera, Ms Yvonne Lester, Mrs Amanda Lyle, Ms Fiona McNeela, Dr Aneta Oborska, Dr James Pennington, Ms Lauren Perkins, Mrs Hollie Robinson-Perrie, Mrs Lauren Shillito, Mr Bryan Singizi, Ms Susan Smolen, Mrs Joanne Topliffe, Mr Ben Vowles, Ms Natalie Whybro, Amon Wijunamai, Mrs Sarah Williams, Ms Lucy Willsher, Ms Joanne Wootton
+
+## Mid Yorkshire Hospitals NHS Trust
+
+**Principal Investigator:**
+Pinderfields Hospital - Dr Sandeep Varma
+
+**Collaborators:**
+Dr Philip Atkinson, Mrs Sarah Buckley, Mrs Thelma Darian, Miss Sachini Dhamaratne, Dr Richard Gould, Dr Laura Graham, Miss Charlotte Hirst, Mr Andrew Peeling, Dr Saxon Prentice, Dr Naresh Rajasekar, Dr Alastair Rose, Dr Craig Smith, Dr Kate Wilkinson
+
+## Milton Keynes University Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Milton Keynes University Hospital - Dr Richard Stewart
+
+**Collaborators:**
+Ms Chrissie Chevis, Dr John Ekpa, Nurse Sara Greig, Nurse Rebecca Hinch, Ms Carole Holder, Dr Nikolaos Makris, Nurse Louise Moran, Nurse Cheryl Padilla Harris, Nurse Diane Scarletta, Ms Jeanette Smith, Nurse Sara-Beth Sutherland, Ms Joanne Turner, Dr Peter Valentine, Dr Amelia van Manen, Nurse Sonia Walia, Nurse Charlotte White, Dr Georgina Wilson, Nurse Lynn Wren, Nurse Francesca Wright
+
+## Newcastle upon Tyne Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Freeman Hospital and Royal Victoria Infirmary - Dr Matthew Faulds
+
+**Collaborators:**
+Dr Claire-Marie Agius, Dr Raheel Ahmed, Dr Sameer Ahmed, Dr Arjun Alva, Dr Rachael Bird, Dr David Buckley, Ms Verity Calder, Dr Caroline Clark, Dr Emily Craven, Ms Katherine Cullen, Mr John Davis, Ms Sadie Diamond-Fox, Dr Helen Doherty, Dr Bhaskar Dutta, Dr Jonathan Fortune, Ms Alexandra Gatehouse, Dr Jane Gibson, Dr David Hay, Dr Steve Hillier, Mr Paul Hindmarch, Dr Michael James, Mr Kiran Keshvara, Dr Karuna Kotur, Dr Peter Lawley, Dr Nimali Lochanie, Dr Lisa Macbeth, Dr Yamuna Madhu, Dr Sam Marcangelo, Ms Lesley McShane, Dr Amy Morgan, Dr Stephen Mowat, Dr Joshua Nelson, Dr Denis O'Leary, Dr Jennifer Partridge, Dr Janaki Pearson, Dr Tom Poulton, Dr Sneha Prasad, Dr Kay Protheroe, Dr Adnaan Qureshi, Dr Girish Rangaswamy, Ms Victoria Richardson, Ms Carmen Scott, Dr Karen Smallshaw, Dr Abdelrahman Soliman, Mr Graham Soulsby, Dr Anna Wahed, Dr Iain Walker, Dr Sarah Welch, Dr Jessica Wilson, Ms Rebecca Wilson, Dr Elaine Winkley, Dr Jonathan Womack
+
+## NHS Ayrshire & Arran
+
+**Principal Investigator:**
+University Hospital Ayr - Dr Joellene Mitchell;
+University Hospital Crosshouse - Dr Peter O'Brien
+
+**Collaborators:**
+Ms Debbie Callaghan, Dr Ruth Clarke, Dr Graeme Foggo, Ms Danielle Gilmour, Dr Stephen Hickey, Dr Stephanie Hii, Dr Susan Livingstone, Ms Megan McAtear, Ms Sharon Meehan, Dr Gemma Milne, Dr James Small
+
+## NHS Dumfries & Galloway
+
+**Principal Investigator:**
+Dumfries and Galloway Royal Infirmary - Dr Dewi Williams
+
+**Collaborators:**
+Ms Catherine Jardine, Dr Graham White, Dr David Wright
+
+## NHS Fife
+
+**Principal Investigator:**
+Victoria Hospital - Dr Katie Hunter
+
+**Collaborators:**
+Dr Gillian Fleming, PA-A Marc Hastie, Dr Catherine Hunter, Dr Jennifer Lockhart, Dr Kirsten Reid, Dr Hilary Robb
+
+## NHS Greater Glasgow & Clyde
+
+**Principal Investigator:**
+Gartnavel General Hospital - Dr Johann Harten;
+Glasgow Royal Infirmary - Dr Barbara A Crooks;
+Institute of Neurological Sciences - Dr Urmila Ratnasabapathy;
+Inverclyde Royal Hospital - Dr Manfred Staber;
+New Victoria Hospital - Dr Tom Pettigrew;
+Queen Elizabeth University Hospital - Dr Daphne Varveris;
+Royal Alexandra Hospital - Dr Michael Brett
+
+**Collaborators:**
+Dr Richard Appleton, Mr Michael Briskoe, Dr Graeme Brown, Dr Stewart Brown, Dr Fiona Christie, Dr Guy Coady, Dr Richard Cowan, Dr Alice Drysdale, Dr Stewart D'Sylva, Dr Paul Edgar, Dr Graeme Finnie, Dr John Gardner, Dr Shub Gupta, Dr Colin Hall, Dr Jane Hamilton, Dr Laura Hunter, Dr Umairali Ikram, Dr Gregor Imrie, Dr Euan Kerr, Dr Michael Kinsella, Ms Maya Kommer, Dr Brian Lafferty, Dr Christopher Lochrin, Dr Tom Lovejoy, Dr Maria Loy, Ms Aillison MacLean, Dr David MacPherson, Dr Cara Marshall, Dr Ruth Mawhinney, Dr Claire McAteer, Prof James McCaul, Dr Michael McCusker, Dr Katherine McDowall, Dr Christopher McGovern, Dr Stewart Mckie, Dr Melanie Morrison, Dr Suleman Mulla, Dr Elizabeth Neale, Dr Cristina Niciu, Dr Su Ying Ong, Dr Finbar O'Sullivan, Dr Sophie Parcell, Dr Sarah Ramsay, Dr Rebecca Robson, Dr Nithin Roy, Dr Jasmine Samuel, Dr Gemma Scotland, Dr Natasha Sharma, Dr Kate Slade, Dr Alvin Soosay, Dr Charlotte Soulsby, Ms Lois Steuart, Dr Sara Stevenson, Dr Laura Sweeney, Dr Kerwei Tan, Dr Calum Taylor, Dr Francesca Th'ng, Dr Caroline Thompson, Dr James Wardlow, Dr Martin Watson, Dr Robin Williams, Mr James Woodier, Dr Simon Young
+
+## NHS Highland
+
+**Principal Investigator:**
+Lorn and Islands Hospital - Dr David Robinson;
+Raigmore Hospital - Dr Jacqueline Howes
+
+**Collaborators:**
+Dr Scott Berwick, Dr Andrew Boyle, Dr Neil Brown, Dr Anna Celnik, Dr Alistair Coleman, Dr Mohamed Elwkhiee, Dr Mario Fernandes, Dr Katie Hanlon, Dr Sarah MacLean, Dr Rhian Morgan
+
+## NHS Lanarkshire
+
+**Principal Investigator:**
+Hairmyres Hospital - Dr Jonathan Edgar;
+Monklands District General Hospital - Dr Roddy Chapman;
+Wishaw General Hospital - Dr Khaled Razouk
+
+**Collaborators:**
+Dr Ali Atrah, Dr Sunny Bhat, Dr Yvonne Bramma, Dr Euan Campbell, Dr Rachel Campbell, Dr Anna Cormack, Dr Stephan Dalchow, Dr Ammy Dodd, Mrs Laura Ferguson, Mrs Donna Ferraioli, Dr Moyra Hynd, Dr Adam Janeczko, Dr Sally Jeffrey, Dr Tony Kinsey, Dr Yuvaraj Kummur, Dr Karen McIntosh, Dr John McKenna, Ms Maria Mclaughlin, Dr Ryhs Millington, Dr Emma Murphy, Miss Kris Parker, Dr Tom Reevell, Miss Fiona Robertson, Dr Will Shankey-Smith, Dr Colum Slorach, Dr Tamas Szelei, Dr Geoff Warnock, Dr Stuart Watson
+
+## NHS Lothian
+
+**Principal Investigator:**
+Royal Infirmary of Edinburgh - Dr Peter Alston;
+St John's Hospital - Dr Murray Geddes;
+Western General Hospital - Dr Stuart McLellan
+
+**Collaborators:**
+Dr Eireann Allen, Dr Karen Birnie, Dr Kirsteen Brown, Dr Julia Critchley, Dr Margaret Cullen, Dr Alex Eros, Dr Callum Forbes, Dr Helen French, Dr David Hall, Dr Jonathan Hetherington, Dr Maximiliane Kellner, Dr Keith Kelly, Dr Hiba Khaled, Dr Damien Mantle, Dr John McLenachan, Dr Susan Midgley, Dr Susan Nimmo, Dr Bart Ordys, Dr Hannah Phelan, Dr Philip Roddam, Dr Louise Shaw, Dr Carolyn Smith, Dr Elizabeth Steel, Dr Robert Stuart, Dr John Sturrock, Dr Alasdair Waite, Dr Fraser Waterson, Dr Hannah Watson, Dr Elizabeth Wood
+
+## NHS Scotland Special Board
+
+**Principal Investigator:**
+Golden Jubilee National Hospital - Prof Stefan Schraag
+
+**Collaborators:**
+Ms Elizabeth Boyd, Dr Surabhi Jain, Ms Elaine Matthews, Dr Geejo Rappai
+
+## NHS Shetland
+
+**Principal Investigator:**
+Gilbert Bain Hospital - Dr Catriona Barr
+
+**Collaborators:**
+Dr Michael Stewart
+
+## NHS Tayside
+
+**Principal Investigator:**
+Ninewells Hospital - Dr Sharon Christie;
+Perth Royal Infirmary - Dr Tim Smith
+
+**Collaborators:**
+Dr Kate Arrow, Dr Pauline Austin, Dr Susie Chapman, Dr Jonathan Little, Dr William Malein, Dr Amy Sadler, Dr Rhona Younger
+
+## Norfolk and Norwich University Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Norfolk and Norwich University Hospital - Dr Caroline Reavley
+
+**Collaborators:**
+Dr Katy Allan, Dr Vignesh Ashok, Ms Ayda Borjian Boroojeny, Mr John-Paul Cutts, Dr Fiona Faulds, Mr Mark Fernie, Dr Amit Gadre, Dr Tom Gately, Dr Richard Haddon, Dr Lalani Induruwage, Dr Siobhan King, Dr Sian Liddle, Dr Paul Mallett, Dr Saurabh Mehotra, Dr Inthekab Mohammed Ali, Dr Rachel Morris, Dr David Nunn, Dr Rocio Ochoa Ferraro, Dr Pulak Padhi, Dr Ewa Prusack, Dr Edmund Quak, Dr Georgina Singleton, Dr Kin So, Dr Daniel Stolady, Dr Drew Welch, Dr Michael Whitear, Dr Kathy Wilkinson, Dr James Wu, Dr Alex Yusaf
+
+## Northampton General Hospital NHS Trust
+
+**Principal Investigator:**
+Northampton General Hospital - Dr Prashant Kakodkar
+
+**Collaborators:**
+Dr Hoda Abou Ghoneim, Mrs Sara Balliston, Mrs Lucy Dudgeon, Dr Muna Elsheikh Idris, Dr Juneenath Karattuparambil, Dr Lohita Nanda, Dr Bhavesh Raithatha, Dr Mahmood Saad, Mrs Jenny Spimpolo, Mrs Linda Titinchi, Mrs Julie Wilson, Mrs Ulrika Winstone
+
+## North Bristol NHS Trust
+
+**Principal Investigator:**
+Southmead Hospital - Dr Sarah Martindale
+
+**Collaborators:**
+Dr Ewen Cameron, Dr Lynn Fenner, Dr Jake Hartford-Beynon, Dr Iain Mooney, Dr Charlotte Mundy, Dr Rhys Rhidian, Dr Sophie Scutt, Dr Anna Todd
+
+## North Cumbria University Hospitals NHS Trust
+
+**Principal Investigator:**
+Cumberland Infirmary - Dr Tim Smith;
+West Cumberland Hospital - Dr Fiona Graham
+
+**Collaborators:**
+Ms Amy Ashton, Mrs Theresa Cooper, Ms Katherine Davidson, Dr Suresh Eapen, Ms Hannah Crowther, Ms Claire Hindmoor, Mrs Anna McSkeane, Dr Mahamed Mostafa, Dr Gururaj Mudimadagu, Ms Polly Rice, Ms Antoinette Wilson
+
+## Northern Devon Healthcare NHS Trust
+
+**Principal Investigator:**
+North Devon District Hospital - Dr Garry Henry
+
+**Collaborators:**
+Dr Nigel Hollister, Mrs Jane Hunt, Mrs Amanda Isaac, Dr David Morris, Mr Antonio Paredes-Guerra, Dr Katherine Pass, Dr Martin Paul, Dr Kiran Rait, Dr Guy Rousseau, Dr Emma Shacklock, Mrs Amanda Skinner, Mrs Lucia Stancombe, Dr Laura Thomson
+
+## Northern Health and Social Care Trust
+
+**Principal Investigator:**
+Antrim Area Hospital - Dr Christopher Nutt;
+Causeway Hospital - Dr Geoffrey Wright
+
+**Collaborators:**
+Dr Johnny Holland, Mrs Orla O'Neill, Dr Arun Sengottaiyans
+
+## Northern Lincolnshire and Goole Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Diana Princess of Wales Hospital - Dr Atideb Mitra;
+Scunthorpe General Hospital - Dr Sanjeev Garg
+
+**Collaborators:**
+Dr Jonathan Adams, Dr Temitope Aiyedun, Dr Hani Ali, Dr Sahar Biuk, Miss Bryany Bond, Mrs Michelle Cheeseman, Dr Mark Clayton, Ms Lisa-Jayne Cottam, Mrs Kathy Dent, Dr Elizabeth Evans, Mrs Sandra Evans, Miss Hannah Goodhand, Mrs Karen Green, Mr Jonathan Hatton, Mrs Joanne Hill, Mrs Dorothy Hutchinson, Dr Shibu Jacob, Dr Renjith Joseph, Dr Laura MacNally, Dr Jason Mann, Mrs Virginia McTaggart, Mrs Maria Newton, Mrs Sandra Pearson, Dr Jaspreet Rayet, Dr Rebecca Saunders, Dr Sandeep Saxena, Dr Hemamangala Venkatesh, Mrs Nikita Whotton
+
+## North Middlesex University Hospital NHS Trust
+
+**Principal Investigator:**
+North Middlesex University Hospital - Dr Ada Ezihe-Ejiofor
+
+**Collaborators:**
+Dr Hemangini Barot, Ms Hayley Bridger, Dr Shady Elhallous, Dr Rizana Ghafoor, Dr Vitul Manhas, Dr Tanmay Patil, Dr Nitin Sadavarte, Dr Bhamini Tharmalingam
+
+## North Tees and Hartlepool NHS Trust
+
+**Principal Investigator:**
+University Hospital of Hartlepool and University Hospital of North Tees - Dr David Pritchard
+
+**Collaborators:**
+Ms Jean Bage, Dr Sarah Higgin, Dr Asokan Krishnaier, Dr Esther Neilly, Dr Sean Rayappu, Dr Chye Siaw, Dr Ilma Songaile, Dr Peter Standen, Dr Narayanan Suresh, Dr William Weston, Ms Lynne Williams, Dr Jiang Yuchen
+
+## Northumbria Healthcare NHS Foundation Trust
+
+**Principal Investigator:**
+Hexham General Hospital - Dr Ravi Alagar;
+North Tyneside General Hospital, Northumbria Specialist Emergency Care Hospital and Wansbeck General Hospital - Dr Adrian Taylor
+
+**Collaborators:**
+Miss Claire Matata, Dr Roopa McCrossan, Dr Andrew Robertson, Dr Priya Shekar, Ms Wendy Stoker, Dr Elizabeth Turnbull, Dr Clare Watkinson, Dr Stephen Worthy, Dr Bryan Yates
+
+## North West Anglia NHS Foundation Trust
+
+**Principal Investigator:**
+Hinchingbrooke Hospital - Dr Dancho Ignatov;
+Peterborough City Hospital - Dr Matthew Davies
+
+**Collaborators:**
+Dr Ayman Abdu, Dr Donata Banni, Ms Helen Bowyer, Dr David Brooks, Dr Ulf Buhmann, Miss Victoria Christenssen, Dr James Collins, Dr Aaron D'Sa, Dr Steven Forde, Miss Alice Groves, Dr Jyothi Hosahalli, Dr Lauren Hunt, Dr George Koshy, Dr Robyn Lee, Mrs Susan Martin, Dr Angus McKnight, Dr Piers Murphy, Dr Henry Nash, Dr Bassey Nkanang, Mrs Pamela Oracki, Mrs Tara Pauley, Mr Alan Pope, Dr Romit Samanta, Dr Panagiotis Sgardelis, Dr Tom Stocks, Dr Sivaprakash Vaitheeswaran, Dr Priya Verma, Dr Madlena Ivanova Vrazhalska, Dr Mike Weisz
+
+## Nottingham University Hospitals NHS Trust
+
+**Principal Investigator:**
+Nottingham City Hospital and Queen's Medical Centre - Prof Iain Moppett
+
+**Collaborators:**
+Dr Subha Arunachalam, Ms Zorba Begum, Dr Sonia Bhangu, Dr Gemma Bown, Dr Avninder Chana, Dr Puja Chhaniyara, Dr Natalie Constable, Dr Luff Delme, Dr Helen Fenner, Dr Oliver Griffith, Dr Stephen Hackett, Dr David Hewson, Dr Kristofor Inkpin, Dr Richard Jones, Dr Richard Kirkdale, Dr Ian Lyons, Dr Arnab Mandal, Dr Prerna Mehrotra, Dr Martin Murphy, Ms Alison Pearce-Smith, Dr Martin Priestley, Ms Shirley Pyke, Dr Sonia Rasoli, Dr Suneal Sharma, Ms Gemma Squires, Dr Peter Tsim, Dr Jonathan Veitch
+
+## Oxford University Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Churchill Hospital, John Radcliffe Hospital and Nuffield Orthopaedic Centre - Mr Giles Bond-Smith, Dr Sam Clark, Dr Olivia Kay and Dr Richard Siviter
+
+**Collaborators:**
+Dr John Allen, Dr Linden Baxter, Ms Sally Beer, Ms Mariana Bernardo, Ms Holly Coles, Dr Jo Cudlip, Dr Talitha Devries, Dr Phil Duggleby, Ms Alexis Espinosa, Dr Karina Fitzgibbon, Dr Joao Galente, Ms Domonique Georgiou, Dr Soumi Ghosh, Dr Nicholas Hingley, Dr Ryan Kingan, Mr Chris Levett, Mr Jose Martinez, Dr Alex Mattin, Dr Anna Moore, Dr Samuel Morrish, Dr Amy Nash, Dr Tejuswi Patel, Dr Cieron Roe, Dr Victoria Thwaites, Dr Anuj Wali, Dr Dafydd Watterson, Dr Anna Wilson
+Dr Charlotte Yates
+
+## Papworth Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Papworth Hospital - Dr Marc Gimenez
+
+**Collaborators:**
+Dr Anita Boltres, Ms Rebecca McClean, Mr Sam Papadopoullos, Dr Elena Teh, Dr Stephen Webb
+
+## Pennine Acute NHS Trust
+
+**Principal Investigator:**
+Fairfield General Hospital and North Manchester General Hospital - Dr Andrew Brammar;
+Royal Oldham Hospital - Dr Joanne Humphreys
+
+**Collaborators:**
+Dr Moiz Alibhai, Dr Daisy Alston, Dr Jolyon Cohen, Dr Laura Coleman, Dr Simon Davies, Miss Dionne Dervin, Dr Rebecca Dooley, Dr Andrew Drummond, Dr Douglas Findlay, Dr Naomi Fleming, Dr Yazzim Hammoud, Miss Sanniah Hussain, Dr Katy Irwin, Mr Asad Javed, Mrs Linda Kent, Mrs Lorraine Lock, Mrs Denise McSorland, Miss Alison Meadows, Mrs Paula Mulligan, Dr Wendy Nichols, Mrs Maria O'Callaghan, Mr Jonathan Ogor, Dr Joanna Poole, Dr Geoffrey Ryder, Mr Akmal Shakoor, Dr Wei Teo
+
+## Plymouth Hospitals NHS Trust
+
+**Principal Investigator:**
+Derriford Hospital - Dr Gary Minto
+
+**Collaborators:**
+Dr Stephen Adshead, Dr Helen Anderson, Dr Adam Carpenter, Dr Stuart Clelland, Dr Priya Datar, Ms Esme Elloway, Dr Matt Holl, Dr Aidan Hulbert, Dr James Humphreys, Mr Ben Hyams, Dr Sam McAleer, Dr Mary Newmarch, Ms Holly Notman, Ms Abigail Patrick, Dr Anna Perham, Ms Catherine Pitman, Ms Fiona Reed, Dr Paul Sampson, Ms Hannah Smith, Dr Sam Spinney, Ms Nina Toms, Dr Tim Warrener
+
+## Poole Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Poole Hospital - Dr Michael Girgis
+
+**Collaborators:**
+Mrs Helena Barcraft-Barnes, Mrs Julie Camsooksai, Ms Carolyn Colvin, Dr Jack Davies, Dr Alex Hamilton, Dr Fiona Linton, Dr Greg Nussbaum, Ms Sarah Patch, Mrs Diane Simpson, Mrs Lee Tbaily
+
+## Portsmouth Hospitals NHS Trust
+
+**Principal Investigator:**
+Queen Alexandra Hospital - Dr James Bain
+
+**Collaborators:**
+Dr Alicja A'Court, Ms Emma Barr, Dr Kate Blethyn, Dr Thomas Craig, Dr Hugh Cutler, Dr Jenny Davies, Dr Rebecca Fry, Mrs Elizabeth Hawes, Dr Nicholas Jenkins, Dr Martin Knight, Dr David Restall, Dr Matthew Stubbs, Dr Angus Sutherland, Dr Claire Swarbrick, Dr Robin Wilson, Dr Paul Winwright
+
+## The Princess Alexandra Hospital NHS Trust
+
+**Principal Investigator:**
+Princess Alexandra Hospital - Dr Kevin Hamilton
+
+**Collaborators:**
+Mrs Anne Adams, Dr Orlanda Allen, Dr Marilyn Boampomaa, Mrs Anna-Marie Boniface, Dr Robert Coe, Mrs Amelia Daniel, Mrs Joanne Finn, Dr Issac Gill, Dr Huw Griffiths, Dr Joanna Hackney, Dr Ruth Han, Dr Edward Hare, Dr Edward Rintoul, Mr Ervin Shpuza, Dr Ruth Smith, Mrs Nikki Staines, Dr Puvan Suppiah, Mrs Tracey White
+
+## Queen Elizabeth Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Queen Elizabeth Hospital - Dr Darcy Pearson
+
+**Collaborators:**
+Dr Ben Cracknell, Dr Nadine Farrell, Dr Jane Hermanowski, Ms Ruth Hodgson, Dr Toby Hoskins, Dr Rhiannon Jones, Dr Sam Keable, Mrs Melissa Rosbergen
+
+## Queen Victoria Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Queen Victoria Hospital - Dr Julian Giles
+
+**Collaborators:**
+Dr Thomas Dawes, Dr Ben Eden Green, Mrs Gail Pottinger, Ms Debbie Weller
+
+## Robert Jones and Agnes Hunt Orthopaedic Hospital Foundation Trust
+
+**Principal Investigator:**
+Robert Jones and Agnes Hunt Orthopaedic Hospital - Dr John John
+
+**Collaborators:**
+Ms Lisa Burgess, Mrs Jean Denton, Ms Alaine Done, Mrs Jayne Edwards, Mrs Theresa Garrett, Mr Rajesh Gilla, Mrs Samantha Griffith-Norris, Ms Teresa Jones, Mrs Barbara Linklater-Jones, Ms Claire Nicholas, Miss Sara Owen, Miss Charlotte Perkins, Mrs Tessa Rowlands, Mrs Julie Steen, Miss Sarah Turner, Mrs Johanna Wales, Miss Carol-Ann Woolley
+
+## Rotherham NHS Foundation Trust
+
+**Principal Investigator:**
+Rotherham Hospital - Dr Anil Hormis
+
+**Collaborators:**
+Miss Dawn Collier, Miss Kathryn Dixon, Dr Michael Gardner, Mrs Vicky Murray, Dr Harry Soar, Mrs Rachel Walker, Dr Shifa Yaruk, Dr Daniel Yarwood
+
+## Royal Berkshire NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Berkshire Hospital - Dr Patrick Dill-Russell
+
+**Collaborators:**
+Dr Aruthy Arumugam, Ms Georgina Bird, Ms Nichola Bleasby, Dr Peter Chater-Lea, Ms Emma Craig, Dr George Davies, Ms Julie Foxton, Dr Helen Gilfillan, Dr Keelan Jerram, Dr Søren Kudsk-Iversen, Dr Rebecca Lee, Dr John Livesy, Dr Amanda Mohabir, Dr Katherine Morris, Dr Mike Raffles, Dr Annika Smith, Dr Huiqi Wang
+
+## Royal Bournemouth & Christchurch Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Bournemouth Hospital - Dr James Craig
+
+**Collaborators:**
+Mrs Nina Barratt, Mr Andy Bates, Mr Norbert Bokor, Dr Julius Cranshaw, Mr Sergio Dominguez, Mrs Annette Fraine, Dr Richard Green, Mrs Katie Molloy, Miss Christina Penny, Mrs Sally Pitts, Miss Laura Purandare, Miss Taslima Rabbi, Miss Monica Serrano, Miss Tina Stoycheva, Mr Luke Vamplew, Mr Steve Williams
+
+## Royal Cornwall Hospitals NHS Trust
+
+**Principal Investigator:**
+Treliske Hospital - Dr Julian Berry
+
+**Collaborators:**
+Miss Benita Adams, Mrs Sarah Bean, Miss Karen Burt, Miss Nicki Devooght-Johnson, Miss Fiona Hammonds, Dr Tom Nicholls, Miss Michelle Rowe, Miss Jessica Summers, Dr Olivia Ward, Miss Belinda Wroath, Miss Gabbie Young
+
+## Royal Devon and Exeter NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Devon and Exeter Hospital - Dr Cathryn Matthews
+
+**Collaborators:**
+Mr Gearoid Crosbie, Dr Alex Dunn, Miss Sara Eddy, Ms Lynda Garcia, Dr James Garwood, Dr Adam Green, Ms Karin Gupwell, Ms Nicola Jones, Mrs Suzie Marriott, Mr Mohammad Masood, Dr Francesca Mazzola, Ms Evanna McEvoy, Dr Yang Ng, Mrs Linda Park, Dr Stephanie Pauling, Mrs Alison Potter, Ms Caroline Renton, Dr Adam Samways, Mrs Pauline Sibley, Ms Jenny Stead, Mr Kevin Thorpe, Dr Elizabeth Turner, Ms Michelle Walter, Mr Kevin Windsor
+
+## Royal Free London NHS Foundation Trust
+
+**Principal Investigator:**
+Barnet General Hospital - Dr Rajeev Jha;
+Chase Farm Hospital - Dr Nicolas Hooker;
+Royal Free Hospital - Dr Carlos Kidel
+
+**Collaborators:**
+Dr Mayavan Abayalingam, Dr Richard Boulding, Dr Philip Coakley, Dr Noor Elahi, Mr Filipe Helder, Dr James Hilton, Dr Kunal Joshi, Dr Rupinder Kaur, Dr Victoria Male, Dr Saqib Naji, Mr Manuel Pinto, Dr Yohinee Rajendran, Dr Manjeet Save, Dr Megan Smith, Dr Emily Spence, Dr Sophie Tang, Dr Thomas Urwin, Dr Marc Wittenberg, Dr Ruoling Yan
+
+## The Royal Liverpool and Broadgreen University Hospitals NHS Trust
+
+**Principal Investigator:**
+Broadgreen Hospital and The Royal Liverpool University Hospital - Dr Colin Williams
+
+**Collaborators:**
+Dr Arjun Ardeshna, Dr Peter Bamford, Dr Sarah Hagyard, Dr Patrick Johnson, Dr Martina McMonagle, Dr Hayleigh Morris, Dr Thomas Murphy, Dr Stavros Papadopoulos, Dr Emma Simpson, Dr Jonathan Smith-Williams, Dr Vin Vyapury
+
+## The Royal Marsden NHS Foundation Trust
+
+**Principal Investigator:**
+The Royal Marsden Hospital, Chelsea and The Royal Marsden Hospital, Sutton - Dr Rohit Juneja
+
+**Collaborators:**
+Ms Ethel Black, Dr Alex Eeles, Dr Justine Elliot, Dr Shaman Jhanji, Dr Reynard Knoetze, Dr Jamie McCanny, Dr Lauren Oswald, Dr Ellie Roderick
+
+## Royal National Orthopaedic Hospital NHS Trust
+
+**Principal Investigator:**
+Royal National Orthopaedic Hospital - Dr Paul Gunning
+
+## The Royal Orthopaedic Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Orthopaedic Hospital - Dr Narendra Siddaiah
+
+**Collaborators:**
+Dr Krishna Balachandar, Dr Chandra Bhimarasetty, Ms Laura Bird, Dr Conny Blunt, Dr Egidio Da Silva, Mr Mark Darbyshire, Ms Irene Echaveznaguicni, Dr Youssef Girgis, Dr Martin Goodman, Dr Dinkar Gowda, Dr Rajashekar Gowni, Ms Melony Hayes, Ms Natalie Jackson, Dr Anitha James, Dr Rekha Jayapal, Ms Claudette Jones, Ms Enid Leung, Dr Simran Minhas, Dr Mona Mubarak, Dr Sudeshkumar Muniyappa, Dr Zehrin Nassa, Dr Tom Neal, Dr Kudakwashe Nyangoni, Dr Suresh Panchakshariah, Ms Bethany Philpott, Mr Craig Pinner, Mr Daniel Pygall, Dr Manamohan Rangaiah, Dr Anil Rao, Dr William Rea, Dr Richard Shellard, Dr Guy Shinner, Dr Tony Sutherland, Dr Liza Tharakan, Ms Sue Thomas, Dr Betty Travasso, Dr Pyda Venkatesh, Ms Dionne Wortley
+
+## Royal Surrey County Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Surrey County Hospital - Dr Matthew Dickinson
+
+**Collaborators:**
+Dr Sophie Benoliel, Mrs Nanci Doyle, Ms Cheryl Marriott, Ms Sarah Martin, Ms Laura Montague, Ms Kate Penhaligon, Dr Rita Saha, Dr Ramai Santhirapala, Dr Lushani Suntharanathan, Ms Nichola Wakeford, Dr Carly Webb, Dr Toby Winterbottom
+
+## Royal United Hospitals Bath NHS Trust
+
+**Principal Investigator:**
+Royal United Hospital - Dr Lesley Jordan
+
+**Collaborators:**
+Dr Matt Aldridge, Ms Clare Bolton-Hill, Prof Tim Cook, Dr Inthu Kangesan, Dr Laura Kettley, Dr Edward Mew, Dr James Penketh, Dr Eleonore Quinn, Dr Sam Scholes
+
+## The Royal Wolverhampton Hospitals NHS Trust
+
+**Principal Investigator:**
+New Cross Hospital - Dr Sreekanth Rayalu Uppugonduri
+
+**Collaborators:**
+Dr Lara Allen, Sr Lyndsay Bibb, Sr Jill Brown, Miss Charlotte Busby, Sr Katherine Cheshire, Matron Beryl Davis, Mrs Rebecca Denyer, Sr Julie Edwards, Miss Laura Gardiner, Dr Shamim Haque, Miss Julia Icke, Miss Katherine Jones, Sr Donna McIntosh, Sr Mandy Oakley, Dr Linda Prasad, Sr Victoria Roberts, CN Andrew Smallwood, Sr Tammy Smith, CTA Lucy Stelfox, Sr Angela Stevens, Sr Angela Willberry
+
+## Salford Royal NHS Foundation Trust
+
+**Principal Investigator:**
+Salford Royal Hospital - Dr Oliver Pratt
+
+**Collaborators:**
+Dr Mahindra Chincholkar, Dr Leanne Darwin, Ms Joy Dearden, Dr Adele Flowerdew, Ms Louise Harrison, Dr Robert Hartley, Ms Andrea Ingham, Dr Ben Jones, Ms Stephanie Lee, Dr Elizabeth Longdon, Ms Tracy Marsden, Ms Kirsty Meats, Ms Angiy Michael, Mr Drew Norwood-Green, Ms Victoria O'Loughlin, Dr Holly Owen, Dr Manju Patel, Ms Jane Perez, Ms Jessica Whiston, Ms Andrea Wood
+
+## Salisbury NHS Foundation Trust
+
+**Principal Investigator:**
+Salisbury District Hospital - Dr Simon Williams
+
+**Collaborators:**
+Dr Chloe Billingham, Mrs Caroline Clarke, Dr Xantha Holmwood, Ms Melba Knighton, Dr Becky Sands, Dr Paul Stevens, Ms Sophia Strong-Sheldrake, Dr Matthew Taylor, Dr Simon Williams
+
+## Sandwell and West Birmingham Hospitals NHS Trust
+
+**Principal Investigator:**
+Birmingham City Hospital and Sandwell General Hospital - Dr Mrutyunjaya Rao Rambhatla
+
+**Collaborators:**
+Dr Elizabeth Brodier, Dr Ozerah Choudhry, Dr Usman Choudhry, Dr Bethany Fitzmaurice, Dr Jonathan Hulme, Dr Santhana Kannan, Dr Kay Anne Mak, Dr Miriam Namih, Dr Bharati Rajdev, Dr Swetha Rambhatla, Dr Stuart Reilley, Dr Rebecca Rice, Dr Nalini Sethia, Dr Katy Smith, Dr Rahul Wakhle, Dr Chris Walmsley
+
+## Sheffield Teaching Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Northern General Hospital and Royal Hallamshire Hospital - Dr Ian Wrench
+
+**Collaborators:**
+Mr Michael Agyemang, Miss Elizabeth Bell, Ms Sarah Bird, Dr James Briscoe, Dr Andy Cruickshanks, Dr Jake Drinkwater, Mr Sam Eggleston, Dr Henry Elms, Dr Laura Hammon, Ms Meredith Harris, Dr Christopher Harrison, Dr Claire Hirst, Ms Kay Housley, Dr Krish Kapoor, Ms Faith Kibutu, Ms Beverly Kilner, Ms Emily King, Ms Emily Kirk, Ms Esme Marshall, Mr Paolo Mazzone, Ms Janet Middle, Ms Leanne Milner, Mr Adam Mitchell, Dr Becky Morris, Ms Alexandra Mudd, Dr Matthew Needham, Dr James Nicholas, Mr Paul Ogle, Dr Rob Penson, Dr Joel Perfitt, Mr Mark Pinkerton, Ms Mayeth Recto, Dr Maria Rehnstrom, Dr Catherine Riley, Dr Lorna Ryan, Ms Jennie Smith, Miss Samantha Strong, Dr Helen Thornley, Miss Bethany Tookey, Mr Daniel West, Dr John Whitaker, Dr Sarah Willcock, Mr Shay Willoughby
+
+## Shrewsbury and Telford Hospital NHS Trust
+
+**Principal Investigator:**
+Princess Royal Hospital - Dr Jane Wright;
+Royal Shrewsbury Hospital - Dr Paul Jones
+
+**Collaborators:**
+Ms Riquella Abbott, Ms Lisa Bacon, Dr Christopher Godden, Dr David Howe, Ms Angela Loughlin, Ms Helen Moore, Dr Samuel Passey, Dr Rebekah Rodgers
+
+## South Eastern Health and Social Care Trust
+
+**Principal Investigator:**
+Ulster Hospital - Dr Paul Foley
+
+**Collaborators:**
+Staff Nurse Samantha Hagan, Dr Simon Marcus
+
+## Southport and Ormskirk Hospital NHS Trust
+
+**Principal Investigator:**
+Ormskirk District General Hospital and Southport and Formby District General Hospital - Dr Christopher Godden
+
+**Collaborators:**
+Ms Irene Gardner, Ms Zena Haslam, Dr David Morris, Ms Moira Morrison, Dr Chai Obeysekera, Dr Kim Porter, Ms Helen Terrett
+
+## South Tees Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+The James Cook University Hospital - Dr Jeremy Henning
+
+**Collaborators:**
+Ms Kirsty Baillie, Ms Ella Buchanan, Mr Martyn Cain, Mrs Kerry Colling, Dr Raquel Duarte, Dr Chris Gibb, Dr Ryan Hynd, Dr Victoria Irvine, Dr Rob Lyons, Mrs Karoline Middleton, Dr Usman Razaque, Dr Faisal Sheikh, Dr Tariq Tabiner
+
+## South Tyneside NHS Foundation Trust
+
+**Principal Investigator:**
+South Tyneside District Hospital - Dr Christian Frey
+
+**Collaborators:**
+Ms Carly Brown, Ms Gayle Clifford, Ms Madeleine McKee, Ms Beverley Stidolph
+
+## South Warwickshire NHS Foundation Trust
+
+**Principal Investigator:**
+Warwick Hospital - Dr Emert White
+
+**Collaborators:**
+Sr Bridget Campbell, Ms Sophie Mason, Sr Penny Parsons, Dr Natasha Santana-Vaz, Ms Camilla Stagg
+
+## St George's Healthcare NHS Trust
+
+**Principal Investigator:**
+St George's Hospital - Dr Nirav Shah
+
+**Collaborators:**
+Mrs Veronica Barnes, Dr Penny Bedoes, Dr Jonathan Clarke, Dr Robert Crichton, Dr Madhurima Das, Dr Paul Davies, Miss Helen Farrah, Dr Aoife Hegarty, Mrs Luisa Howlett, Dr Maren Kleine-Brueggeney, Dr Samson Ma, Dr Veronica Marsh, Dr Katherine McAndrew, Mr Johannes Mellinghoff, Dr Christopher Oscier, Mrs Christine Ryan, Dr Elizabeth Smee, Dr Dushanthi Thurairasa
+
+## St Helens and Knowsley Teaching Hospitals NHS Trust
+
+**Principal Investigator:**
+Whiston Hospital - Dr Vandana Goel
+
+**Collaborators:**
+Dr Christopher Adeney, Dr Sanjay Behl, Ms Karen Chadwick, Dr Thomas Coleman, Dr Claire Davies, Mrs Sharon Dealing, Dr Jamie Elwood, Dr Emma Fadden, Dr Stella Gillies, Dr Tom Kennedy, Dr Thomas Miller, Dr Simon Morton, Dr Rebecca Reilly, Dr Sue Smyth, Dr Thomas Syratt, Dr Emma Welfare
+
+## Stockport NHS Foundation Trust
+
+**Principal Investigator:**
+Stepping Hill Hospital - Dr Elizabeth Thomas
+
+**Collaborators:**
+Ms Jennifer Awolesi, Dr Hannah Bennett, Dr Elizabeth Bradshaw, Dr David Crabtree, Ms Lauren Duraman, Ms Kerry Hughes, Ms Sarah Kirk, Ms Dee Leonard, Dr Rachel Stoeter
+
+## Surrey and Sussex Healthcare NHS Trust
+
+**Principal Investigator:**
+East Surrey Hospital - Dr Simon Parrington
+
+**Collaborators:**
+Dr Matyas Andorka, Dr Kingsin Ang, Mrs Linda Bailey, Dr Stephanie Brooks, Mrs Oon Chiu, Mrs Sally Collins, Dr James Jack, Mr Harry Knight, Miss Anastasia Lynn-Smith, Dr Matt Mackenzie, Dr Sarah Maher, Mrs Louise Nimako, Miss Siva Sangaralingham, Dr Seliat Sanusi, Mrs Samantha Weller, Mrs Elizabeth Willard
+
+## Tameside Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Tameside Hospital - Dr Anand Kulkarni
+
+**Collaborators:**
+Dr Peter Carroll, Mr Martyn Clark, Mrs Martina Coulding, Dr Elizabeth Denman, Dr Mohyman El Habishi, Dr Patrick Haywood, Mrs Jane McConniffe, Ms Jacqueline McCormick, Dr Krishnakar Melachuri, Dr Evelyn Philip, Mrs Stephanie Ridgway, Mrs Heather Savill, Dr Kamal Sharif, Mrs Joanne Vere
+
+## Taunton and Somerset NHS Foundation Trust
+
+**Principal Investigator:**
+Musgrove Park Hospital - Dr Stephen Harris
+
+**Collaborators:**
+Dr Alex Coombs, Ms Flora Darch, Mrs Patricia Doble, Mrs Jayne Foot, Dr Chris Gillett, Dr Thomas Judd, Mrs Alison Moss, Miss Corinne Pawley, Mrs Moira Tait, Ms Alison Whitcher, Dr Natalie Wood
+
+## Torbay and South Devon NHS Foundation Trust
+
+**Principal Investigator:**
+Torbay Hospital - Dr Jane Montgomery
+
+**Collaborators:**
+Ms Gabrielle De Selincourt, Ms Pauline Fitzell, Dr Katie Flower, Ms Kathleen Horan, Ms Bianca Hulance, Ms Pauline Mercer, Dr Sarah Shaw, Mr Robin Webber
+
+## United Lincolnshire Hospitals NHS Trust
+
+**Principal Investigator:**
+Lincoln County Hospital - Dr Manish Kakkar;
+Pilgrim Hospital - Dr Suganthi Joachim
+
+**Collaborators:**
+Dr Seetal Aggarwal, Dr Amr Ali, Dr Boon Ang, Dr Vishnu Bhardwa, Mrs Wendy Deamer, Dr Lorna Filby, Mrs Jo Fletcher, Dr Felix Fombon, Dr Shannon Gawley, Dr Chandrakant Gosavi, Ms Julia Hindle, Mrs Tara Lawrence, Dr Robert Maher, Dr Samantha Moore, Mrs Kimberley Netherton, Dr Teodora Orasanu, Dr Evangelia Poimenidi, Dr Louise Potter, Dr Niyesa Ranasinghe, Mr Lester Ribeiro, Ms Thoy Ruth, Ms Susie Butler, Dr Tim Sutton, Ms Issy Thomas, Dr Divya Veluvolu, Dr Thomas Walker, Dr Charindri Wariyapola, Dr Lail Zaheer
+
+## University College London Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+National Hospital for Neurology and Neurosurgery - Dr Valpuri Luoma;
+Royal National Throat, Nose and Ear Hospital - Dr Catriona Ferguson;
+University College Hospital and University College Hospital at Westmoreland Street - Dr Adrienne Stewart
+
+**Collaborators:**
+Dr Smita Bapat, Dr Gahan Bose, Dr John Bugo, Dr Marta Campbell, Dr Elizabeth Cervi, Dr Sarah Ciechanowicz, Dr Rachel Coathup, Dr Niveen El-Wahab, Dr Claire Frith, Dr Preea Gill, Dr Martin Gray, Dr Astri Luoma, Dr Sachin Mehta, Dr Wint Mon, Dr Mayur Murali, Dr Asya Mussad, Dr Laura Parker, Dr Josh Patch, Dr Paolo Perella, Dr Emily Robson, Dr Thunga Setty, Dr Filipe Vieira, Dr Josh Wall, Dr Jon Witby, Dr Wael Zghaibe, Dr Sheldon Zhang
+
+## University Hospital of North Midlands NHS Trust
+
+**Principal Investigator:**
+Royal Stoke University Hospital - Dr Stephen Merron
+
+**Collaborators:**
+Miss Nenette Abano, Miss Loretta Barnett, Mr Adrian Barry, Ms Pamela Birks, Ms Judith Brade, Mr Adrian Butler, Miss Racquel Carpio, Miss Viv Colclough, Ms Katrina Eaton, Ms Carol Edwards, Miss Lisa Emery, Ms Kay Finney, Ms Susan Gallagher, Dr Satyajeet Ghatge, Miss Jeanette Grocott, Ms Amanda Hall, Ms Alison Hardwick, Miss Anne Harrison, Ms Susan Hendy, Miss Joanne Hiden, Dr Alex James, Dr Vijay Jeganath, Dr Rahul Kumar, Dr Stephen Lord, Ms Rachel Lovatt, Miss Susan Lyjko, Miss Holly Maguire, Ms Mia Marsden, Dr Venu Mehta, Dr Rajeev Mishra, Dr Rohit Mittal, Mr Andrew Moores, Dr Pramod Nalwaya, Dr Matthew Omeara, Dr Sandor Orosz, Dr Nehal Patel, Ms Nicola Pattison, Miss Ida Ponce, Dr Ashok Puttapa, Dr Tamilselvan Rajamanickam, Dr Nagaraj Rao, Miss Alda Remegoso, Ms Rochelle Rhodes, Ms Angela Rooney, Ms Emma Sadler, Dr Permendra Singh, Dr Wai Soon, Dr Simon Tomlins, Dr Kanchan Umbarje, Dr Murali Vallabhaneni, Miss Resti Varquez, Ms Jill Wain, Dr Sorana White, Dr Elizabeth Willetts, Dr Benedict Williams, Dr Andrew Wood
+
+## University Hospital of South Manchester NHS Foundation Trust
+
+**Principal Investigator:**
+Wythenshawe Hospital - Dr Stephen Washington
+
+**Collaborators:**
+Dr Sujata Anipindi, Dr Jennifer Aston, Mrs Joanne Bradley-Potts, Dr Ian Butler, Dr Jennifer Cunningham, Dr Alastair Duncan, Dr Hywel Garrard, Dr Daniel Haslam, Dr Danielle Kirk, Mr Richard McCormick, Dr Michael McEvoy, Dr Sara Mistry, Dr Danielle Ormandy, Dr Tracy Sharp, Dr Carolyn Smith, Dr Andrew Song, Miss Georgina Williamson, Dr Francis Young
+
+## University Hospitals Birmingham NHS Foundation Trust
+
+**Principal Investigator:**
+Queen Elizabeth Hospital - Dr Laura Tasker
+
+**Collaborators:**
+Miss Elizabeth Bailey, Miss Roisin Baker, Ms Amy Bamford, Mr Colin Bergin, Miss Julia Blackburn, Dr Kinga Bodo, Mr Ronald Carrera, Miss Lauren Cooper, Miss Liesl Despy, Mrs Karen Ellis, Mr Morgan Foster, Mrs Sharon Garner, Mr Lyndon Harkett, Mrs Samantha Harkett, Mr Peter Ip, Dr Frances Lay, Mr Hon Sum Liu, Miss Laura Mee, Dr Samir Nazir, Mr Jacob Osbourne-Wylde, Miss Krupali Patel, Mr Martin Pope, Miss Emma Reeves, Miss Melanie Sahni, Dr Charlotte Small, Mr Brendon Spooner, Miss Elaine Spruce, Mr Arlo Whitehouse
+
+## University Hospitals Bristol NHS Foundation Trust
+
+**Principal Investigator:**
+Bristol Royal Infirmary - Dr Nicholas Wharton
+
+**Collaborators:**
+Dr Rachel Alexander, Dr Amy Ashford, Dr Rebecca Aspinall, Dr Richard Bateman, Dr Matthew Bell, Ms Jennifer Bennett-Britton, Dr Jeremy Bewley, Dr Hannah Blanshard, Dr Christopher Bourdeaux, Dr Peter Brook, Dr Helen Cain, Dr Claire Cameron, Dr Naomi Cassells, Dr Nilesh Chauhan, Dr Adrian Clarke, Dr Melanie Cockroft, Dr Alan Cohen, Dr Joanna Collins, Dr Timothy Cominos, Dr Rachael Craven, Dr Ian Davies, Dr Sarah Dolling, Dr Claire Dowse, Kate Driver, Dr Adam Duffen, Dr Sarah-Jane Dunn, Dr Charlotte Earnshaw, Dr Frances Forrest, Dr Dan Freshwater-Turner, Dr Issie Gardner, Dr Matthew Gibbins, Dr Ben Gibbison, Dr Suzanne Gleeson, Dr Timothy Gould, Dr Matthew Govier, Dr Benjamin Gupta, Dr John Hadfield, Dr Nicola Harvey, Dr Sophia Henderson, Dr Lara Herbert, Dr James Hillier, Dr Elizabeth Hood, Dr Ben Howes, Dr Helen Howes, Dr Sian Hughes, Dr Kathryn Jackson, Dr Toby Jacobs, Dr Emma Jenkins, Dr Ian Jenkins, Dr Alistair Johnstone, Dr Lydia Jones, Dr Rebecca Jones, Dr Natasha Joshi, Dr Kajan Kamalanathan, Dr Neil Kellie, Dr Lawrence Kidd, Dr Mike (Stephen) Kinsella, Dr Thomas Knight, Dr Rebecca Leslie, Dr Stephen Linter, Dr Tim Lovell, Dr Matthew Martin, Dr Ursula McHugh, Dr Andrew McIndoe, Dr Rachel McKendry, Dr Alexander Middleditch, Dr Edward Miles, Dr Lesley Milne, Dr Mat Molyneux, Dr Neil Muchatuta, Dr Ruth Murphy, Dr Fran O'Higgins, Dr Kieran Oglesby, Dr Marcin Pachucki, Dr Claudia Paoloni, Dr Nishita Patel, Dr Catherine (Katie) Patton, Dr Skylar Paulich, Dr Annabel Pearson, Dr Anthony Pickering, Dr Martin Platt, Dr Charlie Pope, Dr Steve Pryn, Dr Amit Ranjan, Dr Neil Rasburn, Dr Andrew Ray, Dr Jonathan Rivers, Dr Kieron Rooney, Dr Ian Ryder, Dr Sarah Sanders, Dr Kavita Sasi-Kumar, Dr Liam Scott, Dr Mark Scrutton, Ms Chloe Searles, Dr James Self, Dr Sanjoy Shah, Dr Alison Shaw, Dr Mark Sheils, Dr Toby Shipway, Dr Heather Short, Dr Lauren Simmonds, Dr Daniela Smith, Dr Anjali Soodan, Dr Charlotte Steeds, Mrs Katie Sweet, Dr Phoebe Syme, Dr Matthew J Thomas, Dr Sally Tomkins, Dr Susan Underwood, Dr Adrian Wagstaff, Dr Paul Watson, Ms Denise Webster, Dr Katie Welham, Dr Anne Whaley, Dr Helen Williams, Dr Hannah Wilson, Dr Anoushka Winton, Dr Thomas Woodward, Dr Jeanie Worthington, Dr Stuart Younie
+
+## University Hospitals Coventry and Warwickshire NHS Trust
+
+**Principal Investigator:**
+University Hospital Coventry - Dr Carol Bradbury
+
+**Collaborators:**
+Dr Mohammad Auldin, Dr Kate Bosworth, Dr Falguni Choksey, Dr Bernice Dudkowsky, Dr John Elton, Ms Gail Evans, Dr Charlotte Grove, Dr Clare Ingram, Dr Andrew Kelly, Dr Peter Lax, Dr Elena Lynes, Dr George Madden, Dr Vinesh Mistry, Dr Timothy Molitor, Ms Catherine Morgan, Ms Natalie Morris, Dr Emily Pallister, Ms Pooja Patel, Dr Vijay Ragothaman, Dr Katie Ramm, Dr Ben Robinson, Dr Meghna Sharma, Dr Daniel Shuttleworth, Dr Chandrashekhar Vaidyanath, Dr Jen Warren, Dr Rachel Wong
+
+## University Hospitals of Leicester NHS Trust
+
+**Principal Investigator:**
+Glenfield Hospital - Dr Gary Lau
+
+**Collaborators:**
+Ms Hannah Conway, Dr Adeel Majeed, Dr Jaina Parmar, Dr Meenal Rana, Dr Hakeem Yusuff
+
+## University Hospitals of Morecambe Bay NHS Foundation Trust
+
+**Principal Investigator:**
+Furness General Hospital and Royal Lancaster Infirmary - Dr Corinne Rimmer
+
+**Collaborators:**
+Dr Wael Abdelrhamen, Ms Kathryn Allison, Ms Karen Burns, Dr Nichola Cahill, Dr Jon Clark, Dr Hannah Donaldson, Dr Nick Heseltine, Ms Nicola Mackenzie, Ms Carol McArthur, Dr Neil Moreland, Dr Sharmin Shohelly, Ms Hilary Thatcher, Dr Steven Tran, Dr Catriona Walker
+
+## University Hospital Southampton NHS Foundation Trust
+
+**Principal Investigator:**
+Princess Anne Hospital - Dr Samar Al-Rawi;
+Southampton General Hospital - Dr Mai Wakatsuki
+
+**Collaborators:**
+Dr Alice Aarvold, Dr Melissa Addy, Dr Georgina Ashfield, Dr Nigel Beauchamp, Dr Alex Belcher, Dr Tom Bennett, Dr Victoria Burgess, Dr Andy Burton, Dr Matthew Campbell, Dr Ross Cruikshank, Dr Andy Cumpstey, Dr Rhys Davies, Dr Chris Ford, Dr Renee Ford, Ms Lesley Hawkins, Dr Tim Hendra, Dr Thomas Huttley, Dr Erica Jolly, Ms Nevena Kalcheva, Dr Charlie Kennedy, Dr Jessica Lees, Dr Richard Lowe, Dr Tim Martindale, Dr Sarah McCormick, Dr Hannah McPhee, Dr Fran Millinchamp, Dr Rahul Muddanyake, Dr Eduardo Osorio, Dr Kiran Patel, Dr Samuel Pestell, Dr Steve Phillips, Dr Jamie Plumb, Dr Thomas Pratt, Dr Bert Quartermain, Dr Rebecca Reeves, Dr Sophie Robin, Dr Thecla Scully, Dr Anamika Sehgal, Dr Said Seifalan, Dr Suzanne Shuttleworth, Dr Omar Siddique, Dr Esme Sleap, Dr Victoria Smith, Dr Richard Snooks, Dr Virginia Solanki, Dr Christina Timmons, Dr Alice Trimble, Dr Doug Tunney, Dr Kat Walker, Dr Naomi Wee, Dr James Wigley, Dr Huw Wilkins, Dr Hanna Wong, Dr Laura Wood, Dr Dinithi Yogya, Dr Ruth Young
+
+## Walsall Healthcare NHS Trust
+
+**Principal Investigator:**
+Walsall Manor Hospital - Dr Sumant Shanbhag
+
+**Collaborators:**
+Dr Farrukh Ameer, Dr Jonathan Finnity, Dr James Haddock, Dr Alex Hunt, Dr Aditya Kuravi, Ms Fionnuala Lenehen, Dr Lindsay McOwat, Dr Asad Naqvi, Ms Lisa Richardson, Dr Victoria Siddons
+
+## Warrington & Halton Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+Warrington Hospital and Cheshire and Mersey Treatment Centre - Dr Seema Charters;
+Halton General Hospital - Dr Deepa Jumani
+
+**Collaborators:**
+Dr Peter Bradley, Dr Laura Bubb, Mrs Rebekah Chan, Mrs Lynne Connell, Mrs Rachel Crone, Dr Hannah Davis, Mrs Pascal Defeyter, Dr Alison Evans, Dr Ramdas Howard, Mrs Helena Prady, Mrs Natalie Rogers, Mrs Lindsay Roughley, Mrs Helen Whittle, Dr Daniel Zeinali
+
+## Western Health and Social Care Trust
+
+**Principal Investigator:**
+Altnagelvin Hospital - Dr Vinanti Cherian;
+South West Acute Hospital - Dr Muhammad Usman Latif
+
+**Collaborators:**
+Dr Maqsood Bajwa, Dr Jonny Guy, Dr Krzysztos Guz, Dr Nauman Iftikhar, Dr Beata Iwanicka, Dr Mujeeb Khan, Dr Anna-Marie Love, Dr Celia Montgomery, Dr Stephen Mulvany, Dr Emma O'Kane, Ms Sinead O'Kane, Dr Mansoor Siddiqui, Dr Cathal Small, Dr Shaik Subhani
+
+## Western Sussex Hospitals NHS Foundation Trust
+
+**Principal Investigator:**
+St Richard's Hospital - Dr Emily Dana;
+Worthing Hospital - Dr Richard Kennedy
+
+**Collaborators:**
+Miss Isobel Amey, Mrs Hilary Ashton, Mrs Yolanda Baird, Mrs Caroline Bushell, Miss Indra Chadbourn, Dr Merle Cohen, Dr Emma Finlay, Ms Jeanette Gilbert, Dr David Helm, Mrs Carla Lewis, Dr Jenny Macallan, Mr Jordi Margalef, Dr Nic Martins, Ms Gabi Metiu, Mrs Sally Moore, Dr Hannah Rose, Dr Tom Standley
+
+## West Herts Hospitals NHS Trust
+
+**Principal Investigator:**
+St Albans City Hospital and Watford General Hospital - Dr Valerie Page
+
+**Collaborators:**
+Dr Tomas Bakonyi, Dr Simon Ben-Nathan, Mrs Melanie Claridge, Mrs Jackie Evans, Dr Harriet Gardiner, Dr Ilya Kantsedikas, Dr Ann Lachana, Dr Ratna Makker, Mrs Karen Markwell, Mr Colin Merrill, Dr Prasun Mukerjee, Mrs Lynn O'Donohoe, Dr Fiona Oglesby, Dr Laura Osbourne, Dr Beena Parker, Miss Emelia Passaro, Dr Katherine Russell, Dr Sneh Shah, Mr Saul Sundayi, Mrs Elaine Walker, Ms Xiao Zhao
+
+## Weston Area Health NHS Trust
+
+**Principal Investigator:**
+Weston General Hospital - Dr Guru Hosdurga
+
+**Collaborators:**
+Mrs Donna Cotterill, Dr Nicola Crowther, Mr Harvey Dymond, Dr Thomas Ratcliffe-Law, Mr Glenn Saunders, Dr Thomas Saunders
+
+## West Suffolk NHS Foundation Trust
+
+**Principal Investigator:**
+West Suffolk Hospital - Dr Vijayakumar Gopal
+
+**Collaborators:**
+Dr Sajjad Ahmed, Dr Abdalla Ali, Dr Sarah Crawford, Ms Clare De'Ath, Ms Sally Humphreys, Dr Carin Swanevelder, Dr Yeng Yap
+
+## The Whittington Hospital NHS Trust
+
+**Principal Investigator:**
+The Whittington Hospital - Dr Jane Silk
+
+**Collaborators:**
+Mrs Rashidat Adeniba, Dr Richard Armstrong, Ms Osi Egole, Dr Karen Fan, Ms Kayleigh Gilbert, Miss Laura Gould, Dr John Hickman, Ms Fei Long, Mr Sheik Pahary, Dr Michelle Reichman, Ms Kathryn Simpson
+
+## Wirral University Teaching Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Arrowe Park Hospital and Clatterbridge Hospital - Dr Suresh Singaravelu
+
+**Collaborators:**
+Dr Dabeeruddeen Ahmed, Ms Fiona Brailsford, Dr Laura Bridge, Dr Lauren Collis, Ms Reni Jacob, Ms Cathy Jones, Dr Amanda Kirrage, Dr Jessica Lowe, Ms Joanne Mullen, Dr Andrew Prenter, Dr Sarbpreet Sarao, Dr David Sharpley, Dr Kavita Wankhade
+
+## Worcestershire Acute Hospitals NHS Trust
+
+**Principal Investigator:**
+Alexandra Hospital Redditch - Dr Cindy Persad;
+Worcestershire Royal Hospital - Dr Andrew Burtenshaw
+
+**Collaborators:**
+Dr Kate Blyth, Dr Felicity Corcoran, Dr Caroline Davis, Dr Rachel Dolan, Dr Nageena Hussain, Dr Emma Pearson, Dr Anna Pierson, Dr Victoria Poyntz, Mrs Jessica Thrush, Dr Alex Wollaston, Mrs Julie Wollaston
+
+## Wrightington, Wigan and Leigh NHS Foundation Trust
+
+**Principal Investigator:**
+Royal Albert Edward Infirmary and Wrightington Hospital - Dr Paul Clements
+
+**Collaborators:**
+Dr Arindam Biswas, Dr Sarah Clayton, Dr Thomas Clayton, Dr Naomi Cochrane, Mrs Kirsty Duell, Dr James Evans, Mr Mark Gaskell, Mrs Dianne Heaton, Mrs Linzi Heaton, Mrs Claire Hill, Mrs Ruth Killen, Mrs Sandra Latham, Dr Gemma McIntosh, Mr Chris Moore, Mrs Val Parkinson, Mrs Nicola Pemberton, Dr Matthew Robinson, Dr Alastair Sawyer, Mrs Isabelle Sykes, Mrs Tracey Taylor, Mrs Caroline Tierney, Mrs Katja van de Snepscheut-Jones, Miss Emily Wade, Dr Mohammed Wahid, Dr Henry Wang, Mrs Claire Williams, Dr Dominic Wu, Dr Manjula Yadagiri, Dr Dmitry Zabauski
+
+## Wye Valley NHS Trust
+
+**Principal Investigator:**
+The County Hospital - Dr Laura Troth
+
+**Collaborators:**
+Ms Eleanor Andrews, Dr Ranjit Bains, Dr Laura Beard, Ms Janine Birch, Dr Rachael Britton, Mr Mike Salmon, Ms Elizabeth Vassell
+
+## Yeovil District Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Yeovil District Hospital - Dr Agnieszka Kubisz-Pudelko
+
+**Collaborators:**
+Mr Jamie Allen, Mrs Joanna Allison, Dr Andrew Baird, Dr Rob Gregory, Dr Hannah Luckhurst, Dr Rebecca Mairs, Dr Ben Marshall, Mrs Lucy Pippard, Mrs Tressy Pitt-Kerby, Dr Andrew Savva, Dr Graham Walkden, Dr Celly Weegenaar
+
+## York Teaching Hospital NHS Foundation Trust
+
+**Principal Investigator:**
+Bridlington and District Hospital and Scarborough Hospital - Dr Ben Chandler;
+The York Hospital - Dr Muthuraj Kanakaraj
+
+**Collaborators:**
+Dr Andy Chamberlain, Mr Simon Dyer, Mrs Kerry Elliott, Mr Greg Forshaw, Ms Rosie Furness, Mr Andy Gibson, Miss Laura Howe, Mrs Sarah Kent, Miss Alicia Rodgers, Mr Ben Straughan, Ms Emma Temlett, Mr John Whitwell
+
+```{r}
+sessionInfo()
+```
+
+# REFERENCES
