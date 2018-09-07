@@ -1,6 +1,6 @@
 # SNAP2_Cancellations
 
-This repository contains code used in the analysis and to produce the manuscript for **Wong DJN, Harris SK, Moonesinghe SR, and the SNAP-2: EPICCS collaborators.** Cancelled operations: a 7-day cohort study of planned adult inpatient surgery in 245 UK National Health Service hospitals. *British Journal of Anaesthesia.* 2018;121(4):733–41.
+This repository contains code used in the analysis and to produce the manuscript for **Wong DJN, Harris SK, Moonesinghe SR, and the SNAP-2: EPICCS collaborators.** [Cancelled operations: a 7-day cohort study of planned adult inpatient surgery in 245 UK National Health Service hospitals](https://bjanaesthesia.org/article/S0007-0912(18)30565-8/fulltext). *British Journal of Anaesthesia.* 2018;121(4):733–41.
 
 ## Explanation
 
